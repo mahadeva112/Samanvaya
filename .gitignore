@@ -41,6 +41,7 @@ __pycache__/
 sync_cache.json
 sync_config.json
 sync_results.json
+sync_targets.json
 sync_python_log.txt
 sync_python_pid.txt
 sync_python_done.txt
