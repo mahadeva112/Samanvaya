@@ -52,10 +52,14 @@ ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayName={#AppName}
 UninstallFilesDir={#ScriptDir}\uninstall
 CloseApplications=no
-#ifexist "Samanvaya.ico"
+; Artwork comes from make_icon.py. The comma lists let Inno pick the bitmap
+; that fits the screen's DPI scale.
 SetupIconFile=Samanvaya.ico
 UninstallDisplayIcon={#ScriptDir}\uninstall\Samanvaya.ico
-#endif
+WizardImageFile=wizard_large.bmp,wizard_large_150.bmp,wizard_large_200.bmp,wizard_large_250.bmp
+WizardSmallImageFile=wizard_small.bmp,wizard_small_150.bmp,wizard_small_200.bmp,wizard_small_250.bmp
+WizardImageStretch=no
+WizardImageBackColor=$100C0A
 
 [Messages]
 WelcomeLabel2=This will install [name/ver] into REAPER on this computer.%n%nSamanvaya syncs dubbed voice-over to the original in REAPER. Everything it needs, Python included, comes with this installer.%n%nPlease close REAPER before you continue.
@@ -84,9 +88,7 @@ Source: "..\setup.bat";                DestDir: "{#ScriptDir}"; Flags: ignorever
 ; on update, and leave it behind on uninstall like the settings.
 Source: "..\AutoSync\AutoSync.RPP";    DestDir: "{#ScriptDir}\AutoSync"; Flags: onlyifdoesntexist uninsneveruninstall
 Source: "build\python\*";              DestDir: "{#ScriptDir}\python"; Flags: ignoreversion recursesubdirs createallsubdirs
-#ifexist "Samanvaya.ico"
 Source: "Samanvaya.ico";               DestDir: "{#ScriptDir}\uninstall"; Flags: ignoreversion
-#endif
 
 [UninstallDelete]
 ; Runtime leftovers. API keys (sync_pipeline_settings.json, vertex_key.json)

@@ -41,7 +41,9 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1
 ```
 
 The result is `installer\dist\Samanvaya_Setup_<version>.exe`. The version
-comes from `VERSION`.
+comes from `VERSION`. The icon and the wizard artwork are drawn by
+`installer\make_icon.py` (needs Pillow). Rerun it only if you change the
+design.
 
 **Manual setup** — builds a local `venv` and installs the Python side:
 
