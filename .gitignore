@@ -83,3 +83,8 @@ feedback_outbox/
 # ── Installer build output (installer/build.ps1) ────────────
 installer/build/
 installer/dist/
+
+# Local Samanvaya.lua snapshots (pre-*-backup, *-backup, parked *-ui variants)
+# and dev-only wheels: kept on disk, never shipped.
+Samanvaya.lua.*
+*.whl

@@ -7,7 +7,9 @@
 #   bash setup.sh --direct   → also install direct-mode libs (google-genai,
 #                              soundfile) for running WITHOUT a server.
 #
-# Run once. To update later, run update.sh.
+# Run once. To update later, run it again (with --direct if this is a
+# direct-mode install): it reuses the venv and installs whatever
+# requirements*.txt now ask for.
 # ──────────────────────────────────────────────────────────────
 set -e
 cd "$(dirname "$0")"
@@ -80,8 +82,8 @@ else
     ./venv/bin/python3 -c "import ssl, wave, urllib.request; print('OK (thin client)')"
 fi
 
-# Remember the install mode, so update.sh (and the Lua bootstrapper) keep
-# direct-mode installs direct across updates and venv rebuilds.
+# Remember the install mode, so the Lua bootstrapper keeps direct-mode
+# installs direct when it rebuilds the venv.
 if [ "$DIRECT" = "1" ]; then touch .direct-mode; else rm -f .direct-mode; fi
 
 

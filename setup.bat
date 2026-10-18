@@ -10,7 +10,9 @@ rem
 rem  If Python is missing, this script offers to install it for you
 rem  via winget (built into Windows 10/11).
 rem
-rem  Run once (double-click). To update later, run update.bat.
+rem  Run once (double-click). To update later, run it again (with
+rem  --direct if this is a direct-mode install): it reuses the venv and
+rem  installs whatever requirements*.txt now ask for.
 rem ──────────────────────────────────────────────────────────────
 rem Delayed expansion is on so the helpers below can expand paths as !VAR!
 rem INSIDE parenthesized blocks: %VAR% is expanded while cmd.exe parses the
@@ -110,8 +112,8 @@ if "%DIRECT%"=="1" (
 )
 if not !errorlevel! == 0 ( echo ERROR: verification failed - dependencies did not import. & pause & exit /b 1 )
 
-rem Remember the install mode, so update.bat (and the Lua bootstrapper) keep
-rem direct-mode installs direct across updates and venv rebuilds.
+rem Remember the install mode, so the Lua bootstrapper keeps direct-mode
+rem installs direct when it rebuilds the venv.
 if "%DIRECT%"=="1" ( type nul > ".direct-mode" ) else ( del ".direct-mode" 2>nul )
 
 
