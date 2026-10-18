@@ -28,7 +28,22 @@ nothing but time.
 
 ## Install
 
-**One-time setup** — builds a local `venv` and installs the Python side:
+**Windows, easiest:** run `Samanvaya_Setup_<version>.exe`. It needs no admin
+rights and no Python. It installs into `%APPDATA%\REAPER\Scripts\Samanvaya`
+(or a portable REAPER folder you pick), bundles its own Python, and adds
+`Samanvaya.lua` to REAPER's Action List. Close REAPER before you run it.
+Your API keys stay in place across updates and uninstalls.
+
+To build that exe (needs Python 3.12 and Inno Setup 6 on the build machine):
+
+```bash
+powershell -ExecutionPolicy Bypass -File installer\build.ps1
+```
+
+The result is `installer\dist\Samanvaya_Setup_<version>.exe`. The version
+comes from `VERSION`.
+
+**Manual setup** — builds a local `venv` and installs the Python side:
 
 ```bash
 setup.bat
@@ -57,49 +72,52 @@ run and walks you through installing it (it can even install ReaPack for you).
 
 ## The panel
 
-A rail down the left lists every stage of the job; the pane on the right shows
-whichever one you select, and an action bar runs along the bottom. Neither the
-rail nor the bar scrolls, so the Start button and the readiness line stay on
-screen the whole time you are configuring.
+A rail down the left lists the five stages of the job, each with a one-line
+status under it ("6 VO · 6 dub", "Gateway · verified", "Optional"), so you can
+see what is set without opening anything. The page you pick fills the middle,
+and the worker log sits in a drawer along the bottom.
 
-The rail is the same in every phase, and covers the run and its results as well
-as the setup sections — so a finished run is somewhere you navigate back to
-rather than a screen that replaced the form. A divider separates the stages
-that configure a run from the two that watch one, and each entry carries a
-status dot: you can see Connection is complete without opening it.
+The foot of the rail holds the **Ready** card: a three-part meter (session,
+connection, and the optional script), then **Start sync**, with either what
+is still missing or what the run will do underneath. It turns into **Cancel
+run** while a run is going and **Sync again** once one has finished. Because
+it lives in the rail, it is in reach from every page.
 
-**01 Session** — the two track names, the dub language, and where unplaced
-clips are parked. It shows a live count of how many items REAPER currently
-sees on each track, refreshed once a second, so a wrong track name shows up
+The colours follow the job: teal is the VO lane, amber is the dub lane and the
+one action that moves it.
+
+**1 Session**: the two track names, the dub language, and where unplaced
+clips are parked. Below them, a lane view draws every item REAPER currently
+sees on those tracks, refreshed twice a second, so a wrong track name shows up
 here rather than three minutes into a run.
 
-**02 Connection** — how AI calls are made. Four modes:
+**2 Connection**: how AI calls are made. Four modes, Gateway first:
 
 | Mode | What it needs | When to use it |
 |---|---|---|
+| **Gateway** | LLM URL + LLM API key + ElevenLabs key | Your own OpenAI-compatible LLM endpoint. Give the host (or host + `/v1`); the client appends `/v1/chat/completions` itself. Pick the model from the list the endpoint returns. |
 | **Server** | Server URL + access token | Shared machines. Your proxy holds the real keys; nothing secret lands locally. |
-| **AI Studio** | Google AI Studio key (`AIza…`) | Quickest to get going on your own machine. |
-| **Vertex** | Service-account JSON | No rate limits. Drop `vertex_key.json` next to the script and leave the path blank. |
-| **Gateway** | OpenAI-compatible base URL + bearer key | An internal LiteLLM-style gateway. Give the host (or host + `/v1`); the client appends `/v1/chat/completions` itself. |
+| **AI Studio** | Google AI Studio key (`AIza…`) + ElevenLabs key | Quickest Google route on your own machine. |
+| **Vertex** | Service-account JSON + ElevenLabs key | No rate limits. Drop `vertex_key.json` next to the script and leave the path blank. |
 
-Transcription is always ElevenLabs and matching is always Gemini — Gemini
-never sees the audio. In every mode except Server you need an ElevenLabs key
-alongside whichever Gemini credential the mode asks for.
+Transcription is always ElevenLabs. The LLM only reads the transcripts to
+match lines; it never hears the audio.
 
-**03 Script** — optional. Paste the dub script and the matcher uses it as a
+**3 Script**: optional. Paste the dub script and the matcher uses it as a
 pivot; a blank line marks a topic change it relies on.
 
-**04 Run** — live progress: the three steps, separate meters for VO and dub
-transcription, and the worker log colour-coded by severity. If the worker goes
-quiet for more than a minute the pane says so, and after four minutes it flags
-a probable stall rather than spinning forever.
+**4 Run**: Collect, Match and Place as three boxes with their own bars, the
+overall progress and time left, and the lane view lit up as far as
+transcription has got. If the worker goes quiet for more than a minute the
+page says so, and after four minutes it flags a probable stall.
 
-**05 Results** — what was placed and what was not: four counts, then a
-filterable per-clip table. A failed run shows its error output here instead.
+**5 Results**: four counts, then a filterable per-clip table showing where
+each clip was, where it is now and how far it moved. Click a row to select
+that item in REAPER and put the edit cursor on it.
 
-The action bar carries **Start sync** while you are configuring (with either what is still missing or "Ready
-— 12 VO clips, 11 dub clips"), **Cancel run** while a run is going, and **Sync
-again** once one has finished.
+**Log drawer**: shut, it shows the newest line the worker printed. Open, it
+has level chips (errors, warnings), a text filter and a time gutter. A failed
+run opens it for you.
 
 Settings are saved to `sync_pipeline_settings.json` next to the script. That
 file holds your keys and is gitignored — keep it that way.

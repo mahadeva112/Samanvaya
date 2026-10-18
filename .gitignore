@@ -79,3 +79,7 @@ Thumbs.db
 # Feedback system — token + offline outbox stay local
 github_token.txt
 feedback_outbox/
+
+# ── Installer build output (installer/build.ps1) ────────────
+installer/build/
+installer/dist/

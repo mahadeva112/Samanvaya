@@ -82,7 +82,7 @@ local API_TOKEN        = ""
 -- SERVER_URL is remembered separately from API_BASE so toggling modes never
 -- loses the typed proxy URL. _apply_conn_mode() maps CONN_MODE onto the
 -- underlying API_BASE / GEMINI_BACKEND that the rest of the code + Python read.
-local CONN_MODE        = "vertex"
+local CONN_MODE        = "gateway"
 local SERVER_URL       = ""
 
 -- Reference (dub) script. Pasted straight into the panel. REAPER's input
@@ -698,81 +698,112 @@ end
 -- hairline rim rather than by the words themselves: a whole paragraph in red
 -- shouts, and most of what lands here is ordinary news. The cross closes it.
 -- Drawn by hand rather than through SUI because SUI is declared further down
--- the file and is not in scope here.
+-- the file and is not in scope here. The tones follow the panel's palette:
+-- red for errors, amber for warnings, teal for "done, here is what happened".
 local _BANNER_TONE = {
-  error = { rim = 0xF25C6070, bg = 0x2A181AFF, fg = 0xF3CFD1FF },
-  warn  = { rim = 0xF2B33D70, bg = 0x2A2415FF, fg = 0xEFDCB0FF },
-  info  = { rim = 0x4F8CFF70, bg = 0x1A2231FF, fg = 0xCCD9F0FF },
+  error = { rim = 0xF06A6A59, bg = 0x1F1517FF, dot = 0xF06A6AFF, fg = 0xF6DADAFF, sub = 0xC9A9ABFF },
+  warn  = { rim = 0xF2C14E59, bg = 0x1F1B12FF, dot = 0xF2C14EFF, fg = 0xF4E6C4FF, sub = 0xC4B48FFF },
+  info  = { rim = 0x38C9B059, bg = 0x112019FF, dot = 0x38C9B0FF, fg = 0xD3EFE9FF, sub = 0x9FC2BBFF },
 }
+
+-- An info banner reports something that already happened, so it clears
+-- itself; errors and warnings stay until they are dismissed or fixed.
+local _BANNER_INFO_SECS = 8
 
 local function _ui_render_banner(ctx)
   if not _ui_banner then return end
+  local now = reaper.time_precise and reaper.time_precise() or os.clock()
+  _ui_banner.at = _ui_banner.at or now
+  if _ui_banner.kind == 'info' and now - _ui_banner.at > _BANNER_INFO_SECS then
+    _ui_banner = nil
+    return
+  end
   local t = _BANNER_TONE[_ui_banner.kind] or _BANNER_TONE.info
 
-  -- Padded and rounded like the other surfaces, and auto-height where
-  -- ReaImGui supports it: at a fixed 48 a three-line message lost its tail,
-  -- and TextWrapped wrapped at the host window rather than at this child.
-  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ChildRounding(), 11.0)
+  -- The first sentence is the headline; whatever follows is the advice, set
+  -- a step quieter on its own line. "No items on track X." / "Import … first."
+  local text = _ui_banner.text or ''
+  local head, rest = text:match('^(.-[%.!%?])%s+(.+)$')
+  if not head then head, rest = text, nil end
+
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ChildRounding(), 12.0)
   reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ChildBorderSize(), 1.0)
-  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), 14.0, 11.0)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), 12.0, 10.0)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ChildBg(), t.bg)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Border(),  t.rim)
-  local bflags, bh = _child_border_flag(), 48
+  local bflags, bh = _child_border_flag(), rest and 60 or 42
   if reaper.ImGui_ChildFlags_AutoResizeY then
     bflags, bh = bflags | reaper.ImGui_ChildFlags_AutoResizeY(), 0
   end
-  -- No scrollbar, like every other region. Spelled out rather than read from
-  -- SUI.NOSB for the same reason as the wrap below: SUI is declared further
-  -- down the file and is not in scope here.
   local nosb = (reaper.ImGui_WindowFlags_NoScrollbar
                 and reaper.ImGui_WindowFlags_NoScrollbar()) or 0
   if reaper.ImGui_BeginChild(ctx, '##banner', -1, bh, bflags, nosb) then
+    local dl = reaper.ImGui_GetWindowDrawList and reaper.ImGui_GetWindowDrawList(ctx)
+    local okp, sx, sy = pcall(reaper.ImGui_GetCursorScreenPos, ctx)
     local x0    = reaper.ImGui_GetCursorPosX(ctx)
     local y0    = reaper.ImGui_GetCursorPosY(ctx)
     local avail = reaper.ImGui_GetContentRegionAvail(ctx)
+    local ICON, CLOSE = 20, 22
 
-    -- Wrapped against THIS child, not the host window: TextWrapped uses the
-    -- window work rect, which here sits past the visible right edge. (The
-    -- SUI helper that does this is declared further down the file, so the
-    -- same two lines are spelled out rather than called.) The cross keeps a
-    -- column of its own at the right, so the text stops short of it.
+    -- Icon: a tinted disc with a mark drawn in strokes (no glyphs — the
+    -- default face stops at Latin-1).
+    if dl and okp and type(sx) == 'number' then
+      local cx, cy = sx + ICON * 0.5, sy + ICON * 0.5
+      pcall(reaper.ImGui_DrawList_AddCircleFilled, dl, cx, cy, ICON * 0.5,
+            (t.dot & ~0xFF) | 0x2E)
+      if _ui_banner.kind == 'info' then
+        pcall(reaper.ImGui_DrawList_AddLine, dl, cx - 4, cy, cx - 1, cy + 3, t.dot, 1.8)
+        pcall(reaper.ImGui_DrawList_AddLine, dl, cx - 1, cy + 3, cx + 4.5, cy - 3.5, t.dot, 1.8)
+      else
+        pcall(reaper.ImGui_DrawList_AddLine, dl, cx, cy - 5, cx, cy + 1.5, t.dot, 2.0)
+        pcall(reaper.ImGui_DrawList_AddCircleFilled, dl, cx, cy + 4.6, 1.2, t.dot)
+      end
+    end
+    reaper.ImGui_Dummy(ctx, ICON, ICON)
+    reaper.ImGui_SameLine(ctx, 0, 10)
+
+    -- Text column, wrapped short of the close button's column.
+    reaper.ImGui_SetCursorPosY(ctx, y0 + 2)
+    reaper.ImGui_BeginGroup(ctx)
     local wrapped = false
-    if reaper.ImGui_PushTextWrapPos and type(x0) == 'number'
-       and type(avail) == 'number' then
-      reaper.ImGui_PushTextWrapPos(ctx, x0 + math.max(140, avail - 22))
+    if reaper.ImGui_PushTextWrapPos and type(x0) == 'number' and type(avail) == 'number' then
+      reaper.ImGui_PushTextWrapPos(ctx, x0 + math.max(160, avail - CLOSE - 8))
       wrapped = true
     end
     reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), t.fg)
-    if wrapped then reaper.ImGui_Text(ctx, _ui_banner.text)
-    else            reaper.ImGui_TextWrapped(ctx, _ui_banner.text) end
+    if wrapped then reaper.ImGui_Text(ctx, head) else reaper.ImGui_TextWrapped(ctx, head) end
     reaper.ImGui_PopStyleColor(ctx)
+    if rest then
+      reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), t.sub)
+      if wrapped then reaper.ImGui_Text(ctx, rest) else reaper.ImGui_TextWrapped(ctx, rest) end
+      reaper.ImGui_PopStyleColor(ctx)
+    end
     if wrapped then reaper.ImGui_PopTextWrapPos(ctx) end
+    reaper.ImGui_EndGroup(ctx)
 
-    -- The cross rides on the first line, flush right, and is nothing but a
-    -- glyph until the pointer is over it.
+    -- Close: a thin cross in strokes, with a soft square behind it on hover.
     if type(x0) == 'number' and type(avail) == 'number' then
-      -- A SmallButton is text + 2 * FramePadding.x wide, and the theme's 8
-      -- would push a 23px control past the right edge of a child that has no
-      -- scrollbar to reveal it. Tightened to 5, the glyph is 17px and lands
-      -- flush; the wrap above already reserves the column.
-      reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding(), 5.0, 1.0)
-      reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FrameRounding(), 6.0)
-      reaper.ImGui_SetCursorPos(ctx, x0 + avail - 17, y0 - 1)
-      reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(),        0x00000000)
-      reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonHovered(), 0xFFFFFF1A)
-      reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonActive(),  0xFFFFFF2E)
-      reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(),          t.fg)
-      -- ×, not ✕: the panel's default face is ImGui's own, and a
-      -- glyph past Latin-1 comes out as a box.
-      if reaper.ImGui_SmallButton(ctx, '×##bn') then _ui_banner = nil end
-      reaper.ImGui_PopStyleColor(ctx, 4)
-      reaper.ImGui_PopStyleVar(ctx, 2)
+      reaper.ImGui_SetCursorPos(ctx, x0 + avail - CLOSE, y0 - 1)
+      local okb, bx, by = pcall(reaper.ImGui_GetCursorScreenPos, ctx)
+      local hit = reaper.ImGui_InvisibleButton(ctx, '##bannerclose', CLOSE, CLOSE)
+      local okh, hov = pcall(reaper.ImGui_IsItemHovered, ctx)
+      hov = okh and hov
+      if dl and okb and type(bx) == 'number' then
+        if hov then
+          pcall(reaper.ImGui_DrawList_AddRectFilled, dl, bx, by, bx + CLOSE, by + CLOSE,
+                0xFFFFFF14, 6.0)
+        end
+        local c, cx, cy = hov and t.fg or t.sub, bx + CLOSE * 0.5, by + CLOSE * 0.5
+        pcall(reaper.ImGui_DrawList_AddLine, dl, cx - 4, cy - 4, cx + 4, cy + 4, c, 1.2)
+        pcall(reaper.ImGui_DrawList_AddLine, dl, cx + 4, cy - 4, cx - 4, cy + 4, c, 1.2)
+      end
+      if hit then _ui_banner = nil end
     end
     reaper.ImGui_EndChild(ctx)
   end
   reaper.ImGui_PopStyleColor(ctx, 2)
   reaper.ImGui_PopStyleVar(ctx, 3)
-  reaper.ImGui_Dummy(ctx, 0, 5)
+  reaper.ImGui_Dummy(ctx, 0, 6)
 end
 
 local function _spinner_glyph()
@@ -1419,6 +1450,17 @@ local function find_python()
   local sep = _is_windows() and "\\" or "/"
   local bin = _is_windows() and "Scripts\\python.exe" or "bin/python3"
 
+  -- 2a. Bundled runtime — the Windows installer (Samanvaya_Setup.exe) ships
+  -- an embeddable Python with every package preinstalled in ./python, so a
+  -- fresh machine needs no Python of its own and no setup.bat run.
+  if _is_windows() then
+    local bundled = script_dir .. "\\python\\python.exe"
+    if file_exists(bundled)
+       and (not reaper.ExecProcess or probe_python('"' .. bundled .. '"')) then
+      return bundled
+    end
+  end
+
   -- 2. Local venv next to this script — what setup.bat / setup.sh create.
   -- A venv whose base Python was uninstalled or upgraded still has its
   -- interpreter on disk but cannot run — probe by EXECUTING it, not just
@@ -1748,6 +1790,13 @@ local function apply_results(results_path, dub_items)
       goto continue
     end
 
+    -- One row per clip for the Results table — where it was, where it went.
+    _ui_results_rows[#_ui_results_rows + 1] = {
+      dub_id = r.dub_id, status = r.status, item = d.item,
+      old_position = d.pos,
+      new_position = (r.status ~= "missing_file") and r.new_position or d.pos,
+    }
+
     if r.status == "matched" and r.new_position then
       reaper.SetMediaItemInfo_Value(d.item, "D_POSITION", r.new_position)
       moved = moved + 1
@@ -1821,56 +1870,61 @@ local SUI = {}
 local _APP_VERSION = ''
 
 SUI.col = {
-  bg      = 0x14161CFF,   -- window
-  rail    = 0x1A1E27FF,   -- navigation rail
-  card    = 0x1E222BFF,   -- raised surface
-  cardhi  = 0x2A3140FF,   -- control on a card
-  line    = 0x323947FF,   -- hairline
+  -- The two lanes are the whole job, so they own the colour: teal is the VO
+  -- (what is already right), amber is the dub (what gets moved). Amber is
+  -- also the one action that moves it, Start sync. Everything else is ink.
+  bg      = 0x0D0F14FF,   -- window
+  rail    = 0x13161DFF,   -- workflow rail, log drawer
+  card    = 0x13161DFF,   -- raised surface
+  cardhi  = 0x1A1E27FF,   -- control on a card
+  line    = 0x323846FF,   -- hairline
+  rim     = 0x262B36FF,   -- quieter hairline, lane wells
   hair    = 0xFFFFFF0E,   -- card rim: white at 5%, so it reads on any ground
-  text    = 0xE8EBF2FF,
-  dim     = 0x99A2B4FF,   -- secondary copy
-  -- faint and gutter used to be 0x6B7488 and 0x4A5364. They carry 10-11px
-  -- copy — eyebrows, footnotes, log timestamps — where those measured 3.4:1
-  -- and 2.1:1 against the surfaces behind them. Lifted to clear 4.5:1.
-  faint   = 0x8A93A6FF,   -- tertiary copy
+  well    = 0x0A0C10FF,   -- sunken: editor, log lines, timeline
+  text    = 0xE9ECF2FF,
+  dim     = 0xA3AABAFF,   -- secondary copy
+  faint   = 0x8A93A6FF,   -- tertiary copy (clears 4.5:1 on the rail)
   gutter  = 0x6E778AFF,   -- log time column, placeholder text, idle dot
-  accent  = 0x4F8CFFFF,   -- Samanvaya blue
-  accent2 = 0x9B6BFFFF,   -- violet, gradient partner
-  ok      = 0x36D399FF,
-  warn    = 0xF2B33DFF,
-  err     = 0xF25C60FF,
+  accent  = 0xF0A24BFF,   -- amber: the dub lane and the primary action
+  accent2 = 0x38C9B0FF,   -- teal: the VO lane
+  vo      = 0x38C9B0FF,
+  dub     = 0xF0A24BFF,
+  ink_on  = 0x1D1206FF,   -- type on an amber fill
+  ok      = 0x4BD08BFF,
+  warn    = 0xF2C14EFF,
+  err     = 0xF06A6AFF,
   white   = 0xFFFFFFFF,
 }
 
 -- Colour + style-var tables are applied by name so a ReaImGui that predates
 -- any single entry simply skips it instead of erroring out.
 SUI.theme = {
-  { 'WindowBg',             0x14161CFF },
+  { 'WindowBg',             0x0D0F14FF },
   { 'ChildBg',              0x00000000 },
-  { 'PopupBg',              0x1B1F27FF },
-  { 'Border',               0x2A303CFF },
-  { 'FrameBg',              0x1B202AFF },
-  { 'FrameBgHovered',       0x242B37FF },
-  { 'FrameBgActive',        0x2B3341FF },
-  { 'TitleBg',              0x14161CFF },
-  { 'TitleBgActive',        0x1B1F27FF },
-  { 'Text',                 0xE8EBF2FF },
+  { 'PopupBg',              0x13161DFF },
+  { 'Border',               0x262B36FF },
+  { 'FrameBg',              0x0A0C10FF },
+  { 'FrameBgHovered',       0x12151BFF },
+  { 'FrameBgActive',        0x161A22FF },
+  { 'TitleBg',              0x13161DFF },
+  { 'TitleBgActive',        0x13161DFF },
+  { 'Text',                 0xE9ECF2FF },
   { 'TextDisabled',         0x5C6577FF },
-  { 'Button',               0x2A3140FF },
-  { 'ButtonHovered',        0x353D4EFF },
-  { 'ButtonActive',         0x3E4757FF },
-  { 'Header',               0x232A36FF },
-  { 'HeaderHovered',        0x2D3543FF },
-  { 'HeaderActive',         0x364052FF },
-  { 'Separator',            0x2A303CFF },
+  { 'Button',               0x1A1E27FF },
+  { 'ButtonHovered',        0x262B36FF },
+  { 'ButtonActive',         0x323846FF },
+  { 'Header',               0x1A1E27FF },
+  { 'HeaderHovered',        0x262B36FF },
+  { 'HeaderActive',         0x323846FF },
+  { 'Separator',            0x262B36FF },
   { 'ScrollbarBg',          0x00000000 },
   { 'ScrollbarGrab',        0x2E3542FF },
   { 'ScrollbarGrabHovered', 0x3A4354FF },
   { 'ScrollbarGrabActive',  0x46516AFF },
-  { 'PlotHistogram',        0x4F8CFFFF },
-  { 'CheckMark',            0x4F8CFFFF },
-  { 'TableHeaderBg',        0x232A36FF },
-  { 'TableBorderLight',     0x272E3AFF },
+  { 'PlotHistogram',        0xF0A24BFF },
+  { 'CheckMark',            0xF0A24BFF },
+  { 'TableHeaderBg',        0x1A1E27FF },
+  { 'TableBorderLight',     0x262B36FF },
   { 'TableBorderStrong',    0x323947FF },
   { 'TableRowBg',           0x00000000 },
   { 'TableRowBgAlt',        0xFFFFFF08 },
@@ -2113,10 +2167,9 @@ function SUI.dotcol(state)
 end
 
 -- One-of-N selector. Returns the (possibly new) 1-based index.
--- The chosen segment is the primary button's fill at the primary button's
--- corner, so "this is the mode you are in" and "this is the thing that runs"
--- read as one family. The rest are hairline outlines, which keeps the row
--- quiet until you look at it.
+-- The chosen segment is lifted (the 'raised' tone) rather than amber, so the
+-- mode you are in never competes with Start sync for the eye. The rest are
+-- hairline outlines, which keeps the row quiet until you look at it.
 function SUI.segmented(ctx, id, labels, cur)
   local avail = reaper.ImGui_GetContentRegionAvail(ctx)
   local n, gap = #labels, 6
@@ -2126,7 +2179,7 @@ function SUI.segmented(ctx, id, labels, cur)
   for i = 1, n do
     local on = (i == cur)
     if on then
-      if SUI.cta(ctx, labels[i] .. '##' .. id .. i, w, 30) then out = i end
+      if SUI.cta(ctx, labels[i] .. '##' .. id .. i, w, 30, 'raised') then out = i end
     else
       reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(),        0x00000000)
       reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonHovered(), 0xFFFFFF0F)
@@ -2340,12 +2393,17 @@ function SUI.cta(ctx, label, w, h, tone, dim)
   if tone == 'danger' then
     spec = { { 0x8E2C31FF }, { 0xA83840FF }, { 0x74232AFF } }
     fg, rim, shade = SUI.col.white, 0xFFFFFF2A, 0x070B12FF
+  elseif tone == 'raised' then
+    -- A chosen segment: lifted off the well, but not amber. Amber is kept for
+    -- the one control that starts the job.
+    spec = { { 0x262B36FF }, { 0x2E3441FF }, { 0x323846FF } }
+    fg, rim, shade = SUI.col.text, 0xFFFFFF1F, nil
   elseif tone == 'ghost' then
-    spec = { { 0x00000000 }, { 0x272E3AFF }, { 0x323947FF }, outline = true }
+    spec = { { 0x00000000 }, { 0x1A1E27FF }, { 0x262B36FF }, outline = true }
     fg, rim, shade = SUI.col.dim, SUI.col.line, nil
   else
-    spec = { { SUI.col.accent }, { 0x6BA0FFFF }, { 0x3D74DDFF } }
-    fg, rim, shade = SUI.col.white, 0xFFFFFF3D, 0x070B12FF
+    spec = { { SUI.col.accent }, { 0xF5B266FF }, { 0xD98E3AFF } }
+    fg, rim, shade = SUI.col.ink_on, 0xFFFFFF59, 0x050608FF
   end
   return _pill_button(ctx, label, w or 0, h or 32, spec, fg, rim, shade, dim,
                       SUI.BTN_R)
@@ -2482,8 +2540,276 @@ local _ui_moved      = 0
 local _ui_unmatched  = 0
 local _ui_row_filter = ''
 
-local CONN_LABELS = { 'Server', 'AI Studio', 'Vertex', 'Gateway' }
-local CONN_VALUES = { 'server', 'studio',    'vertex', 'gateway' }
+-- ── Timeline ──────────────────────────────────────────────
+-- The job drawn the way REAPER holds it: one lane per track, one block per
+-- item. Read from the project at most twice a second. The blocks are
+-- positions, not waveforms — enough to see at a glance whether the dub lines
+-- up under the VO, and which clips ended up parked.
+SUI.tl = { at = -1, lanes = nil }
+
+function SUI.tl_dirty() SUI.tl.at = -1 end
+
+function SUI.tl_read()
+  local now = os.clock()
+  if SUI.tl.lanes and now - SUI.tl.at < 0.5 then return SUI.tl.lanes end
+  SUI.tl.at = now
+  local function grab(name, col)
+    local tr = (name or '') ~= '' and find_track_by_name(name) or nil
+    return { name = name or '', col = col, found = tr ~= nil,
+             items = tr and get_items_sorted(tr) or {} }
+  end
+  SUI.tl.lanes = {
+    grab(TRACK_VO_NAME,  SUI.col.vo),
+    grab(TRACK_DUB_NAME, SUI.col.dub),
+    grab(TRACK_UNSYNC,   SUI.col.err),
+  }
+  return SUI.tl.lanes
+end
+
+-- Draws the lanes into an `h`-tall strip at the cursor, full width.
+-- `lit`, when given, is how many items of each lane to draw at full strength;
+-- the rest are dimmed. During a run that is how far transcription has got.
+function SUI.timeline(ctx, h, lit)
+  local lanes = SUI.tl_read()
+  local show = {}
+  for i, L in ipairs(lanes) do
+    -- The parking lane only earns its row once something is parked on it.
+    if i <= 2 or #L.items > 0 then
+      show[#show + 1] = { L = L, idx = i }
+    end
+  end
+
+  local okp, x0, y0 = pcall(reaper.ImGui_GetCursorScreenPos, ctx)
+  local w = reaper.ImGui_GetContentRegionAvail(ctx)
+  if type(w) ~= 'number' or w < 60 then w = 300 end
+  reaper.ImGui_Dummy(ctx, w, h)
+  if not okp or type(x0) ~= 'number' or not reaper.ImGui_GetWindowDrawList then
+    return
+  end
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+
+  local t0, t1 = math.huge, -math.huge
+  for _, e in ipairs(show) do
+    for _, it in ipairs(e.L.items) do
+      if it.pos < t0 then t0 = it.pos end
+      if it.pos + it.len > t1 then t1 = it.pos + it.len end
+    end
+  end
+
+  local LBL, GAP = 96, 6
+  local n  = #show
+  local lh = math.floor((h - GAP * (n - 1)) / n)
+  local lx0, lx1 = x0 + LBL, x0 + w
+  local okt, _, th = pcall(reaper.ImGui_CalcTextSize, ctx, 'Ag')
+  th = (okt and type(th) == 'number') and th or 14
+
+  for row, e in ipairs(show) do
+    local L  = e.L
+    local ly = y0 + (row - 1) * (lh + GAP)
+    local cy = ly + lh * 0.5
+    pcall(reaper.ImGui_DrawList_AddRectFilled, dl, x0, cy - 4, x0 + 8, cy + 4, L.col, 2.0)
+    pcall(reaper.ImGui_DrawList_PushClipRect, dl, x0, ly, lx0 - 8, ly + lh, true)
+    pcall(reaper.ImGui_DrawList_AddText, dl, x0 + 14, cy - th * 0.5,
+      L.found and SUI.col.dim or SUI.col.warn, L.name ~= '' and L.name or '(no name)')
+    pcall(reaper.ImGui_DrawList_PopClipRect, dl)
+
+    pcall(reaper.ImGui_DrawList_AddRectFilled, dl, lx0, ly, lx1, ly + lh, SUI.col.well, 6.0)
+
+    if not L.found then
+      pcall(reaper.ImGui_DrawList_AddText, dl, lx0 + 10, cy - th * 0.5,
+        SUI.col.warn, 'no track by this name')
+    elseif t1 > t0 then
+      local sx  = (lx1 - lx0 - 8) / (t1 - t0)
+      local lim = lit and lit[e.idx]
+      for k, it in ipairs(L.items) do
+        local a = lx0 + 4 + (it.pos - t0) * sx
+        local b = math.max(a + 2, a + it.len * sx - 1)
+        local c = _col_fade(L.col, (lim and k > lim) and 0.25 or 0.85)
+        pcall(reaper.ImGui_DrawList_AddRectFilled, dl, a, ly + 4, b, ly + lh - 4, c, 3.0)
+      end
+    end
+  end
+
+  if t1 <= t0 then
+    local msg = 'No items on these tracks yet'
+    local okm, mw = pcall(reaper.ImGui_CalcTextSize, ctx, msg)
+    mw = (okm and type(mw) == 'number') and mw or 180
+    pcall(reaper.ImGui_DrawList_AddText, dl,
+      lx0 + math.max(8, (lx1 - lx0 - mw) * 0.5), y0 + h * 0.5 - th * 0.5,
+      SUI.col.faint, msg)
+  end
+end
+
+-- Collect / Match / Place as three boxes, each with its own bar. Done is
+-- teal, the one in progress is amber, the rest wait in a hairline.
+SUI.PHASES = {
+  { 'Collect', 'reading items, writing config', 0.00, 0.05 },
+  { 'Match',   'transcribe, then align',        0.05, 0.92 },
+  { 'Place',   'move dub items into place',     0.92, 1.00 },
+}
+
+function SUI.phase_strip(ctx)
+  local H, GAP = 62, 8
+  local okp, x0, y0 = pcall(reaper.ImGui_GetCursorScreenPos, ctx)
+  local w = reaper.ImGui_GetContentRegionAvail(ctx)
+  if type(w) ~= 'number' or w < 60 then w = 300 end
+  reaper.ImGui_Dummy(ctx, w, H)
+  if not okp or type(x0) ~= 'number' or not reaper.ImGui_GetWindowDrawList then
+    return
+  end
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+  local bw = (w - GAP * 2) / 3
+  local all_done = (_ui_phase == 'success')
+  for i, p in ipairs(SUI.PHASES) do
+    local bx = x0 + (i - 1) * (bw + GAP)
+    local frac = 0
+    if all_done or _ui_step_idx > i then
+      frac = 1
+    elseif _ui_step_idx == i and _ui_phase == 'running' then
+      frac = (_ui_progress - p[3]) / (p[4] - p[3])
+      if frac < 0 then frac = 0 elseif frac > 1 then frac = 1 end
+    end
+    local done   = frac >= 1
+    local active = (not done) and _ui_phase == 'running' and _ui_step_idx == i
+    local edge   = done and _col_fade(SUI.col.vo, 0.55)
+                   or (active and SUI.col.dub or SUI.col.rim)
+
+    pcall(reaper.ImGui_DrawList_AddRectFilled, dl, bx, y0, bx + bw, y0 + H, SUI.col.well, 10.0)
+    pcall(reaper.ImGui_DrawList_AddRect, dl, bx, y0, bx + bw, y0 + H, edge, 10.0, 0, 1.0)
+
+    -- Number in a ring, or a tick in a filled teal disc once done.
+    local cx, cy = bx + 20, y0 + 19
+    if done then
+      pcall(reaper.ImGui_DrawList_AddCircleFilled, dl, cx, cy, 9, SUI.col.vo)
+      SUI.tick(dl, cx, cy, SUI.col.bg)
+    else
+      pcall(reaper.ImGui_DrawList_AddCircle, dl, cx, cy, 9,
+        active and SUI.col.dub or SUI.col.line, 0, 1.5)
+      SUI.centre_text(ctx, dl, cx, cy, tostring(i),
+        active and SUI.col.dub or SUI.col.faint)
+    end
+    pcall(reaper.ImGui_DrawList_PushClipRect, dl, bx, y0, bx + bw - 8, y0 + H, true)
+    pcall(reaper.ImGui_DrawList_AddText, dl, bx + 36, y0 + 11,
+      (done or active) and SUI.col.text or SUI.col.dim, p[1])
+    pcall(reaper.ImGui_DrawList_AddText, dl, bx + 12, y0 + 32, SUI.col.faint, p[2])
+    pcall(reaper.ImGui_DrawList_PopClipRect, dl)
+
+    local by = y0 + H - 9
+    pcall(reaper.ImGui_DrawList_AddRectFilled, dl, bx + 12, by, bx + bw - 12, by + 3,
+      SUI.col.rim, 2.0)
+    if frac > 0 then
+      pcall(reaper.ImGui_DrawList_AddRectFilled, dl, bx + 12, by,
+        bx + 12 + (bw - 24) * frac, by + 3, done and SUI.col.vo or SUI.col.dub, 2.0)
+    end
+  end
+end
+
+-- A tick drawn as two strokes: the default face stops at Latin-1, so a ✓
+-- glyph would render as a box on most installs.
+function SUI.tick(dl, cx, cy, col)
+  pcall(reaper.ImGui_DrawList_AddLine, dl, cx - 4, cy, cx - 1, cy + 3, col, 1.8)
+  pcall(reaper.ImGui_DrawList_AddLine, dl, cx - 1, cy + 3, cx + 4.5, cy - 3.5, col, 1.8)
+end
+
+function SUI.centre_text(ctx, dl, cx, cy, s, col)
+  local ok, tw, th = pcall(reaper.ImGui_CalcTextSize, ctx, s)
+  if not (ok and type(tw) == 'number') then tw, th = 7, 13 end
+  pcall(reaper.ImGui_DrawList_AddText, dl, cx - tw * 0.5, cy - (th or 13) * 0.5, col, s)
+end
+
+-- The window's close button, drawn the way REAPER's own windows draw theirs:
+-- a thin cross with nothing around it, and a red block behind it on hover.
+-- ImGui's own is a heavy cross in a circle and cannot be restyled, so the
+-- window opens without one while floating (see frame()) and this is painted
+-- in its place on the title bar.
+--
+-- It is NOT an ImGui item. Placing a button on the title bar means moving the
+-- cursor there and back, and ImGui 1.89+ throws at End() when a SetCursorPos
+-- is the last thing in a window — which stopped the whole script. So this
+-- only draws, and reads the mouse itself: armed on a press inside the box,
+-- fired on a release still inside it, like a real button.
+--
+-- `native_close` hands closing back to ImGui: when docked (no title bar;
+-- REAPER's docker owns it), when an API it needs is missing, or if drawing
+-- ever fails. The window must never end up with no way to close.
+SUI.native_close = not (reaper.ImGui_GetMousePos and reaper.ImGui_IsMouseClicked
+  and reaper.ImGui_IsMouseReleased and reaper.ImGui_IsWindowHovered
+  and reaper.ImGui_DrawList_PushClipRect and reaper.ImGui_GetWindowDrawList)
+SUI.close_armed = false
+
+function SUI.close_x(ctx, title_h, on_close)
+  local docked = false
+  if reaper.ImGui_IsWindowDocked then
+    local ok, d = pcall(reaper.ImGui_IsWindowDocked, ctx)
+    docked = (ok and d) and true or false
+  end
+  if docked then SUI.native_close = true; return end
+  if SUI.native_close and not docked and SUI._api_missing then return end
+  SUI.native_close = false
+
+  local wx, wy = reaper.ImGui_GetWindowPos(ctx)
+  local ww = reaper.ImGui_GetWindowWidth(ctx)
+  if type(wx) ~= 'number' or type(ww) ~= 'number' then return end
+
+  local W, H = 40, title_h
+  local x0, y0, x1, y1 = wx + ww - 1 - W, wy + 1, wx + ww - 1, wy + H
+
+  -- Hover: the pointer is in the box and nothing else is on top of us.
+  -- AllowWhenBlockedByActiveItem, because pressing on the title bar makes
+  -- ImGui start a window move, which would otherwise hide the release.
+  local hf = reaper.ImGui_HoveredFlags_AllowWhenBlockedByActiveItem
+             and reaper.ImGui_HoveredFlags_AllowWhenBlockedByActiveItem() or 0
+  local mx, my = reaper.ImGui_GetMousePos(ctx)
+  local inside = type(mx) == 'number' and mx >= x0 and mx < x1 and my >= y0 and my < y1
+  local hov = inside and reaper.ImGui_IsWindowHovered(ctx, hf)
+
+  if hov and reaper.ImGui_IsMouseClicked(ctx, 0) then SUI.close_armed = true end
+  local fire = false
+  if SUI.close_armed and reaper.ImGui_IsMouseReleased(ctx, 0) then
+    fire = inside
+    SUI.close_armed = false
+  end
+
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+  -- The title bar lies outside the content clip rect; lift it for the paint.
+  reaper.ImGui_DrawList_PushClipRect(dl, wx, wy, wx + ww, wy + H, false)
+  if hov or SUI.close_armed then
+    local TR = reaper.ImGui_DrawFlags_RoundCornersTopRight
+               and reaper.ImGui_DrawFlags_RoundCornersTopRight() or 0
+    reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1,
+      SUI.close_armed and 0xA3241AFF or 0xC42B1CFF, 9.0, TR)
+  end
+  local c = (hov or SUI.close_armed) and SUI.col.white or SUI.col.dim
+  local cx, cy, r = (x0 + x1) * 0.5, (y0 + y1) * 0.5, 4.5
+  reaper.ImGui_DrawList_AddLine(dl, cx - r, cy - r, cx + r, cy + r, c, 1.0)
+  reaper.ImGui_DrawList_AddLine(dl, cx + r, cy - r, cx - r, cy + r, c, 1.0)
+  reaper.ImGui_DrawList_PopClipRect(dl)
+
+  if fire then on_close() end
+end
+SUI._api_missing = SUI.native_close
+
+-- Back to the setup form after a run, keeping the settings.
+function SUI.reset_run()
+  _ui_phase = 'setup'; _ui_failure = nil
+  _ui_step_idx = 0; _ui_progress = 0.0
+  _ui_en_total = 0; _ui_dub_total = 0; _ui_en_done = 0; _ui_dub_done = 0
+  _poll_step_phase = 0; _ui_cancelled = false
+  _ui_results_rows = {}; _ui_summary = nil; _ui_row_filter = ''
+  log_clear(); _ui_result = nil
+  SUI.tl_dirty()
+end
+
+-- The log lives in a drawer under the pane, not on a page of its own: the
+-- one line you want during a run is the newest, and it should be readable
+-- from whichever page you are on.
+SUI.drawer_open = false
+SUI.DRAWER_SHUT = 42
+
+-- Gateway first: your own OpenAI-compatible LLM plus an ElevenLabs key is
+-- the usual setup, so it is the mode the panel opens on.
+local CONN_LABELS = { 'Gateway', 'Server', 'AI Studio', 'Vertex' }
+local CONN_VALUES = { 'gateway', 'server', 'studio',    'vertex' }
 
 
 -- ═══════════════════════════════════════════════════════════
@@ -2496,7 +2822,7 @@ local CONN_VALUES = { 'server', 'studio',    'vertex', 'gateway' }
 -- Shell metrics. SHELL_PAD is the margin between the window border and the
 -- three regions — without it the rail sits flush against the frame and the
 -- rounded window corner gets painted over by a square child.
-local RAIL_W, FOOT_H, SHELL_PAD = 176, 72, 10
+local RAIL_W, SHELL_PAD = 212, 10
 
 -- Title-bar metrics. ImGui draws the bar inside Begin() off whatever font and
 -- FramePadding are on the stack, and sizes its close button off the FONT
@@ -2524,25 +2850,24 @@ local _ui_dialog = nil
 
 local function ui_ask(spec) _ui_dialog = spec end
 
+-- The log is not a stage: it is the drawer under every page.
 local NAV = {
-  { key = 'session',    num = '01', label = 'Session'    },
-  { key = 'connection', num = '02', label = 'Connection' },
-  { key = 'script',     num = '03', label = 'Script'     },
-  { sep = true },
-  { key = 'run',        num = '04', label = 'Run'        },
-  { key = 'log',        num = '05', label = 'Log'        },
-  { key = 'results',    num = '06', label = 'Results'    },
+  { key = 'session',    num = '1', label = 'Session'    },
+  { key = 'connection', num = '2', label = 'Connection' },
+  { key = 'script',     num = '3', label = 'Script'     },
+  { key = 'run',        num = '4', label = 'Run'        },
+  { key = 'results',    num = '5', label = 'Results'    },
 }
 
 local PANE_HEAD = {
   session    = { 'Session',
                  'Which tracks Samanvaya reads, and what language the dub is in.' },
   connection = { 'Connection',
-                 'How the AI calls are made, and which credentials they use.' },
+                 'ElevenLabs transcribes; an LLM matches the lines.' },
   script     = { 'Reference script',
                  'Optional. The matcher pivots through it to group lines.' },
   run        = { 'Run',
-                 'Live progress, step by step.' },
+                 'Collect, match, place. REAPER stays usable throughout.' },
   log        = { 'Worker log',
                  'Every line the Python worker printed, newest at the bottom.' },
   results    = { 'Results',
@@ -2569,7 +2894,7 @@ local function refresh_state()
   _st.has_vertex_file = fexists(get_script_dir() .. '/vertex_key.json')
     or (VERTEX_KEY_PATH ~= '' and fexists(VERTEX_KEY_PATH))
 
-  _st.conn_idx = 3
+  _st.conn_idx = 1
   for i, v in ipairs(CONN_VALUES) do if v == CONN_MODE then _st.conn_idx = i end end
 
   -- What is still missing, named exactly as the field is labelled.
@@ -2583,8 +2908,8 @@ local function refresh_state()
     if (API_TOKEN  or '') == '' then miss[#miss+1] = 'Access token' end
   else
     if CONN_MODE == 'gateway' then
-      if (GEMINI_BASE_URL or '') == '' then miss[#miss+1] = 'Gateway URL' end
-      if (GEMINI_KEY      or '') == '' then miss[#miss+1] = 'Bearer key'  end
+      if (GEMINI_BASE_URL or '') == '' then miss[#miss+1] = 'LLM URL'     end
+      if (GEMINI_KEY      or '') == '' then miss[#miss+1] = 'LLM API key' end
     elseif CONN_MODE == 'vertex' then
       if not _st.has_vertex_file and (VERTEX_KEY_PATH or '') == '' then
         miss[#miss+1] = 'Vertex service JSON'
@@ -2624,6 +2949,64 @@ local function refresh_state()
   else
     _st.dot_results = 'off'
   end
+
+  -- One line under each rail entry, so the rail answers "what is set" without
+  -- opening anything.
+  local function items(n) return n == 1 and '1 clip' or (n .. ' clips') end
+  local R = {}
+  if not _st.tracks_named then
+    R.session = { 'warn', 'Name the two tracks' }
+  elseif _st.en < 0 or _st.dub < 0 then
+    R.session = { 'warn', 'Track not found' }
+  elseif not _st.tracks_ok then
+    R.session = { 'warn', 'No items on the tracks' }
+  else
+    R.session = { 'ok', string.format('%s VO · %s dub', _st.en, _st.dub) }
+  end
+
+  local mode = CONN_LABELS[_st.conn_idx] or 'Gateway'
+  local pr = _probe.results and _probe.results[CONN_MODE == 'server' and 'server' or 'matcher']
+  local pst = pr and pr.status
+  if not _st.conn_ok then
+    R.connection = { 'warn', 'Needs ' .. (_st.missing[_st.session_missing + 1] or 'a key') }
+  elseif pst == 'invalid_key' or pst == 'not_found' or pst == 'provider_down' then
+    R.connection = { 'err', mode .. ' · check the key' }
+  elseif pst == 'ok' then
+    R.connection = { 'ok', mode .. ' · verified' }
+  elseif pst == 'checking' then
+    R.connection = { 'ok', mode .. ' · checking' }
+  else
+    R.connection = { 'ok', mode .. ' · set' }
+  end
+
+  if _st.script_on then
+    local paras = 1
+    for _ in SCRIPT_TEXT:gmatch('\n%s*\n') do paras = paras + 1 end
+    R.script = { 'ok', paras .. (paras == 1 and ' topic' or ' topics') }
+  else
+    R.script = { 'off', 'Optional' }
+  end
+
+  if _st.running then
+    R.run = { 'run', string.format('Running · %d%%', math.floor(_ui_progress * 100)) }
+  elseif _ui_phase == 'success' then
+    R.run = { 'ok', 'Done · ' .. SUI.mmss(_ui_run_secs) }
+  elseif _ui_phase == 'failure' then
+    R.run = { 'err', _ui_cancelled and 'Cancelled' or 'Failed' }
+  else
+    R.run = { 'off', _st.can_start and 'Ready to sync' or 'Not ready yet' }
+  end
+
+  if _ui_phase == 'success' then
+    R.results = { _ui_unmatched > 0 and 'warn' or 'ok',
+      string.format('%d placed · %d parked', _ui_moved, _ui_unmatched) }
+  elseif _ui_phase == 'failure' then
+    R.results = { 'err', 'See the log' }
+  else
+    R.results = { 'off', 'After the run' }
+  end
+  R.items = items
+  _st.rail = R
 end
 
 -- Follow the engine: a run that starts pulls you to Run, a run that ends
@@ -2633,154 +3016,188 @@ local function sync_nav_to_phase()
   if _ui_phase == _ui_last_phase then return end
   _ui_last_phase = _ui_phase
   if     _ui_phase == 'running' then _ui_nav = 'run'
-  elseif _ui_phase == 'success' or _ui_phase == 'failure' then _ui_nav = 'results'
+  elseif _ui_phase == 'success' or _ui_phase == 'failure' then
+    _ui_nav = 'results'
+    SUI.tl_dirty()
+    if _ui_phase == 'failure' then SUI.drawer_open = true end
   elseif _ui_phase == 'setup'   then _ui_nav = 'session' end
 end
 
 
 -- ─── The rail ─────────────────────────────────────────────
-local function ui_rail(ctx)
-  local open = SUI.pane(ctx, '##rail', RAIL_W, -FOOT_H, SUI.col.rail, 16.0, 12.0, 16.0)
+-- Wordmark, the five stages with a status line under each, and — pinned to
+-- the foot — the readiness card that holds Start sync. The button lives here
+-- rather than on one page, so it is in reach from wherever you are setting up.
+local function ui_rail(ctx, on_start)
+  local open = SUI.pane(ctx, '##rail', RAIL_W, 0, SUI.col.rail, 12.0, 14.0, 14.0)
   if open then
-    -- Everything the rail draws by hand is measured from the cursor, which
-    -- sits at the pane's content left — so the right-hand end of a rule, a
-    -- wash or a line of type is the CONTENT width, not the rail's outer
-    -- width. Getting that wrong is how the eyebrow used to lose its tail.
-    local INNER_W = RAIL_W - 32
+    local INNER_W = RAIL_W - 24
     do
       local oka, aw = pcall(reaper.ImGui_GetContentRegionAvail, ctx)
       if oka and type(aw) == 'number' and aw > 0 then INNER_W = aw end
     end
-
-    SUI.big(ctx, SUI.col.white, 'Samanvaya', 17)
-    -- Wide-set small caps under the wordmark: the rail is the one place the
-    -- panel gets to say what it is. At 10px they sit as a true eyebrow under
-    -- the 17px wordmark and match the spine's stage numbers — the default
-    -- 13px face was both too loud for a subtitle and, once the pane started
-    -- honouring its padding, too wide for 144px of rail.
-    local ver = (_APP_VERSION ~= '' and ('   ·   v' .. _APP_VERSION) or '')
-    SUI.fitline(ctx, SUI.col.faint, {
-      'D U B   A L I G N M E N T' .. ver,
-      'D U B   A L I G N M E N T',
-      'D U B  A L I G N M E N T',
-      'DUB ALIGNMENT' .. ver,
-      'DUB ALIGNMENT',
-    }, 10, INNER_W)
-    SUI.gap(ctx, 9)
-
-    local dots = {
-      session = _st.dot_session, connection = _st.dot_conn, script = _st.dot_script,
-      run     = _st.dot_run,     results    = _st.dot_results,
-      log     = _st.dot_log,
-    }
-
-    -- The rail is a spine: one node per stage, joined by a hairline, with the
-    -- stage name over its number. The node still carries the stage's STATUS
-    -- rather than its position in the list — knowing Connection is green
-    -- without opening it is the whole point of the dot, and a spine that only
-    -- said "you are here" would throw that away. What the spine adds is the
-    -- shape of the job: where you are in it, and how much of it is settled.
-    --
-    -- Rows are InvisibleButtons with everything painted over them, because a
-    -- Button would fill its own background and there is no way to put the
-    -- connector line and the node ring underneath it.
-    local ROW_H, NODE_X, LBL_X = 38, 4.5, 22
     local dl = reaper.ImGui_GetWindowDrawList(ctx)
-    local prev_cy, prev_col = nil, nil
 
+    -- Wordmark: a tile split teal | amber — the two lanes — then the name.
+    do
+      local okp, x0, y0 = pcall(reaper.ImGui_GetCursorScreenPos, ctx)
+      reaper.ImGui_Dummy(ctx, 24, 24)
+      if okp and type(x0) == 'number' then
+        local L = reaper.ImGui_DrawFlags_RoundCornersLeft
+                  and reaper.ImGui_DrawFlags_RoundCornersLeft() or 0
+        local Rr = reaper.ImGui_DrawFlags_RoundCornersRight
+                   and reaper.ImGui_DrawFlags_RoundCornersRight() or 0
+        pcall(reaper.ImGui_DrawList_AddRectFilled, dl, x0, y0, x0 + 12, y0 + 24, SUI.col.vo, 7.0, L)
+        pcall(reaper.ImGui_DrawList_AddRectFilled, dl, x0 + 12, y0, x0 + 24, y0 + 24, SUI.col.dub, 7.0, Rr)
+      end
+      reaper.ImGui_SameLine(ctx, 0, 9)
+      local cy = reaper.ImGui_GetCursorPosY(ctx)
+      reaper.ImGui_SetCursorPosY(ctx, cy + 2)
+      SUI.big(ctx, SUI.col.white, 'Samanvaya', 16)
+    end
+    local ver = (_APP_VERSION ~= '' and ('  ·  v' .. _APP_VERSION) or '')
+    SUI.fitline(ctx, SUI.col.faint, {
+      'DUB ALIGNMENT' .. ver, 'DUB ALIGNMENT',
+    }, 10, INNER_W)
+    SUI.gap(ctx, 10)
+    SUI.eyebrow(ctx, 'Workflow')
+    SUI.gap(ctx, 2)
+
+    local R = _st.rail or {}
+    local ROW_H = 44
     for _, e in ipairs(NAV) do
-      if e.sep then
-        -- The divider between the stages that configure a run and the two
-        -- that watch one. It marks the seam without cutting the spine:
-        -- prev_cy is left alone, so the next row draws one unbroken connector
-        -- straight across this gap rather than butting two segments together.
-        local okp, sx, sy = pcall(reaper.ImGui_GetCursorScreenPos, ctx)
-        if okp and type(sx) == 'number' then
-          pcall(reaper.ImGui_DrawList_AddLine, dl,
-            sx + LBL_X, sy + 4, sx + INNER_W - 2, sy + 4,
-            _col_fade(SUI.col.line, 0.8), 1.0)
+      local on    = (_ui_nav == e.key)
+      local st    = R[e.key] or { 'off', '' }
+      local state, line = st[1], st[2]
+
+      local okp, x0, y0 = pcall(reaper.ImGui_GetCursorScreenPos, ctx)
+      if reaper.ImGui_InvisibleButton(ctx, '##nav' .. e.key, INNER_W, ROW_H) then
+        _ui_nav = e.key
+      end
+      local okh, hov = pcall(reaper.ImGui_IsItemHovered, ctx)
+      hov = okh and hov or false
+
+      if okp and type(x0) == 'number' then
+        local x1, y1 = x0 + INNER_W, y0 + ROW_H
+        if on then
+          pcall(reaper.ImGui_DrawList_AddRectFilled, dl, x0, y0 + 1, x1, y1 - 1, SUI.col.cardhi, 9.0)
+          pcall(reaper.ImGui_DrawList_AddRect, dl, x0, y0 + 1, x1, y1 - 1, SUI.col.line, 9.0, 0, 1.0)
+        elseif hov then
+          pcall(reaper.ImGui_DrawList_AddRectFilled, dl, x0, y0 + 1, x1, y1 - 1, 0xFFFFFF08, 9.0)
         end
-        SUI.gap(ctx, 8)
-      else
-        local on   = (_ui_nav == e.key)
-        local d    = dots[e.key]
-        local dcol = SUI.dotcol(d)
 
-        local okp, x0, y0 = pcall(reaper.ImGui_GetCursorScreenPos, ctx)
-        if reaper.ImGui_InvisibleButton(ctx, '##nav' .. e.key, -1, ROW_H) then
-          _ui_nav = e.key
-        end
-        local okh, hov = pcall(reaper.ImGui_IsItemHovered, ctx)
-        hov = okh and hov or false
-
-        if okp and type(x0) == 'number' then
-          local cy = y0 + ROW_H * 0.5
-
-          -- Hover wash, behind everything, inset so it does not swallow the
-          -- spine down the left edge.
-          if hov and not on then
-            pcall(reaper.ImGui_DrawList_AddRectFilled, dl,
-              x0 + LBL_X - 8, y0 + 2, x0 + INNER_W - 2, y0 + ROW_H - 2,
-              0xFFFFFF0A, 8.0)
-          end
-
-          -- Connector up to the row above.
-          if prev_cy then
-            pcall(reaper.ImGui_DrawList_AddLine, dl,
-              x0 + NODE_X, prev_cy + 7, x0 + NODE_X, cy - 7,
-              prev_col or SUI.col.line, 1.0)
-          end
-
-          -- The node. The selected stage gets a soft halo in the accent, so
-          -- "where I am" and "how this stage is doing" are two signals in one
-          -- place without either shouting over the other.
-          if on then
-            pcall(reaper.ImGui_DrawList_AddCircleFilled, dl,
-              x0 + NODE_X, cy, 7.5, _col_fade(SUI.col.accent, 0.16))
-          end
-          if d == 'off' then
-            pcall(reaper.ImGui_DrawList_AddCircle, dl,
-              x0 + NODE_X, cy, 4.0, dcol, 0, 1.4)
+        -- The disc: you-are-here wins, then the stage's own state.
+        local cx, cy = x0 + 18, y0 + ROW_H * 0.5
+        local ring = ({ ok = SUI.col.vo, warn = SUI.col.warn, err = SUI.col.err,
+                        run = SUI.col.dub })[state] or SUI.col.line
+        if on then
+          pcall(reaper.ImGui_DrawList_AddCircleFilled, dl, cx, cy, 11, SUI.col.text)
+          if state == 'ok' then SUI.tick(dl, cx, cy, SUI.col.bg)
+          else SUI.centre_text(ctx, dl, cx, cy, e.num, SUI.col.bg) end
+        else
+          pcall(reaper.ImGui_DrawList_AddCircle, dl, cx, cy, 11, ring, 0, 1.5)
+          if state == 'ok' then SUI.tick(dl, cx, cy, SUI.col.vo)
           else
-            pcall(reaper.ImGui_DrawList_AddCircleFilled, dl,
-              x0 + NODE_X, cy, 4.5, dcol)
-          end
-          prev_cy, prev_col = cy, (d == 'off') and SUI.col.line or _col_fade(dcol, 0.45)
-
-          -- Name over number.
-          pcall(reaper.ImGui_DrawList_AddText, dl, x0 + LBL_X, y0 + 6,
-            on and SUI.col.white or SUI.col.dim, e.label)
-          if _ui_font then
-            local pushed = pcall(reaper.ImGui_PushFont, ctx, _ui_font, 10)
-            pcall(reaper.ImGui_DrawList_AddText, dl, x0 + LBL_X, y0 + 22,
-              SUI.col.faint, e.num)
-            if pushed then pcall(reaper.ImGui_PopFont, ctx) end
-          else
-            pcall(reaper.ImGui_DrawList_AddText, dl, x0 + LBL_X, y0 + 21,
-              SUI.col.faint, e.num)
+            SUI.centre_text(ctx, dl, cx, cy, e.num,
+              state == 'off' and SUI.col.faint or ring)
           end
         end
+
+        pcall(reaper.ImGui_DrawList_PushClipRect, dl, x0, y0, x1 - 6, y1, true)
+        pcall(reaper.ImGui_DrawList_AddText, dl, x0 + 38, y0 + 6,
+          on and SUI.col.white or SUI.col.text, e.label)
+        local lc = ({ warn = SUI.col.warn, err = SUI.col.err, run = SUI.col.dub })[state]
+                   or SUI.col.faint
+        if _ui_font then
+          local pushed = pcall(reaper.ImGui_PushFont, ctx, _ui_font, 11)
+          pcall(reaper.ImGui_DrawList_AddText, dl, x0 + 38, y0 + 24, lc, line)
+          if pushed then pcall(reaper.ImGui_PopFont, ctx) end
+        else
+          pcall(reaper.ImGui_DrawList_AddText, dl, x0 + 38, y0 + 23, lc, line)
+        end
+        pcall(reaper.ImGui_DrawList_PopClipRect, dl)
       end
     end
 
-    -- Foot of the rail: where unplaced clips go. Small, permanent, useful —
-    -- and pushed to the bottom, so the rail reads as a full column rather
-    -- than a list of buttons with a caption drifting under it.
-    -- Two text lines plus the spacing between them. Reserve the real height,
-    -- or the second line lands under the pane's bottom edge and gets clipped.
-    local lh = 16
-    if reaper.ImGui_GetTextLineHeight then
-      local okh, h = pcall(reaper.ImGui_GetTextLineHeight, ctx)
-      if okh and type(h) == 'number' then lh = h end
-    end
-    -- Dummy() itself is followed by an ItemSpacing, and so is the first line,
-    -- so the reserve has to cover two lines plus two gaps.
-    local need = lh * 2 + 16
-
+    -- ── Readiness card, pinned to the foot ──
+    local CARD_H = 142
     local _, ry = reaper.ImGui_GetContentRegionAvail(ctx)
-    SUI.gap(ctx, (type(ry) == 'number' and ry > need + 12) and (ry - need) or 6)
-    SUI.text(ctx, SUI.col.faint, 'Unplaced clips park on')
-    SUI.text(ctx, SUI.col.dim,   TRACK_UNSYNC)
+    if type(ry) == 'number' and ry > CARD_H + 6 then SUI.gap(ctx, ry - CARD_H - 6) end
+
+    reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ChildRounding(), 12.0)
+    reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ChildBorderSize(), 1.0)
+    reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), 12.0, 11.0)
+    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ChildBg(), SUI.col.bg)
+    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Border(),  SUI.col.rim)
+    local cf, wf = _child_pad_flag()
+    if reaper.ImGui_BeginChild(ctx, '##ready', -1, CARD_H,
+                               _child_border_flag() | cf, SUI.NOSB | wf) then
+      local fullw = reaper.ImGui_GetContentRegionAvail(ctx)
+      if type(fullw) ~= 'number' or fullw < 80 then fullw = 160 end
+      local set = (_st.session_missing == 0 and _st.tracks_ok and 1 or 0)
+                + (_st.conn_ok and 1 or 0)
+      SUI.eyebrow(ctx, 'Ready')
+      reaper.ImGui_SameLine(ctx)
+      local tag = set .. ' of 2 set'
+      local okw, tw = pcall(reaper.ImGui_CalcTextSize, ctx, tag)
+      local cw = reaper.ImGui_GetContentRegionAvail(ctx)
+      if okw and type(tw) == 'number' and type(cw) == 'number' then
+        reaper.ImGui_SetCursorPosX(ctx, reaper.ImGui_GetCursorPosX(ctx) + cw - tw)
+      end
+      SUI.text(ctx, SUI.col.faint, tag)
+
+      -- Three segments: session, connection, and the optional script — which
+      -- fills teal when present and stays a hairline when not, never amber.
+      do
+        local okp, mx, my = pcall(reaper.ImGui_GetCursorScreenPos, ctx)
+        local mw = reaper.ImGui_GetContentRegionAvail(ctx)
+        reaper.ImGui_Dummy(ctx, mw, 4)
+        if okp and type(mx) == 'number' and type(mw) == 'number' then
+          local segs = { _st.tracks_ok, _st.conn_ok, _st.script_on }
+          local sw = (mw - 8) / 3
+          for i, on in ipairs(segs) do
+            local sx = mx + (i - 1) * (sw + 4)
+            pcall(reaper.ImGui_DrawList_AddRectFilled, reaper.ImGui_GetWindowDrawList(ctx),
+              sx, my, sx + sw, my + 4, on and SUI.col.vo or SUI.col.rim, 2.0)
+          end
+        end
+      end
+      SUI.gap(ctx, 4)
+
+      local label, tone, act, disabled, hint, hint_col
+      if _st.running then
+        label, tone, act = 'Cancel run', 'danger', cancel_python
+        hint, hint_col = string.format('Matching · %d%%', math.floor(_ui_progress * 100)),
+                         SUI.col.dub
+      elseif _st.finished then
+        label, act = 'Sync again', SUI.reset_run
+        hint_col = (_ui_phase == 'success') and SUI.col.ok or SUI.col.err
+        hint = (_ui_phase == 'success')
+          and string.format('%d placed · %d parked', _ui_moved, _ui_unmatched)
+          or (_ui_cancelled and 'Cancelled.' or 'Run failed — see the log.')
+      else
+        label, act = 'Start sync', on_start
+        disabled = not _st.can_start
+        if disabled then
+          hint, hint_col = 'Needs: ' .. table.concat(_st.missing, ', '), SUI.col.warn
+        elseif not _st.tracks_ok then
+          hint, hint_col = 'No items on the tracks yet.', SUI.col.warn
+        else
+          hint, hint_col = string.format('%s dub → %s', R.items(_st.dub), TRACK_VO_NAME),
+                           SUI.col.faint
+        end
+      end
+      _ui_begin_disabled(ctx, disabled == true)
+      if SUI.cta(ctx, label .. '##go', fullw, 38, tone, disabled == true) then
+        act()
+      end
+      _ui_end_disabled(ctx)
+      SUI.gap(ctx, 1)
+      SUI.wrap(ctx, hint_col, hint)
+      reaper.ImGui_EndChild(ctx)
+    end
+    reaper.ImGui_PopStyleColor(ctx, 2)
+    reaper.ImGui_PopStyleVar(ctx, 3)
   end
   SUI.pane_end(ctx, open)
 end
@@ -2877,6 +3294,7 @@ local function ui_pane_session(ctx)
           local made, why = create_project_structure()
           if made then
             _probe_at = -1      -- the counts above are stale; re-read them now
+            SUI.tl_dirty()
             log(string.format('Created %d track%s from the template: %s',
               #made, #made == 1 and '' or 's', table.concat(made, ', ')))
             ui_set_banner('info', string.format('%d track%s added — %s.',
@@ -2905,14 +3323,15 @@ local function ui_pane_session(ctx)
     end
   end
 
+  SUI.gap(ctx, 12)
+  SUI.eyebrow(ctx, 'What the run will see')
+  SUI.gap(ctx, 3)
+  SUI.timeline(ctx, 70)
   SUI.gap(ctx, 6)
   SUI.wrap(ctx, SUI.col.faint,
-    'ElevenLabs transcribes, Gemini matches. Counts come straight from the '
-    .. 'timeline and refresh once a second — a wrong track name shows up here '
-    .. 'rather than three minutes into a run. Create lays the session out from '
-    .. 'AutoSync/AutoSync.RPP — those tracks, their FX chains, and the master '
-    .. 'chain if the master is still empty. Edit that project in REAPER to '
-    .. 'change what gets built.')
+    'Counts and lanes come straight from the timeline, so a wrong track name '
+    .. 'shows up here rather than three minutes into a run. Create builds the '
+    .. 'tracks and FX chains saved in AutoSync/AutoSync.RPP.')
 end
 
 
@@ -3089,9 +3508,9 @@ local function ui_pane_connection(ctx)
         SUI.field(ctx, 'Service JSON', 108)
         rv, VERTEX_KEY_PATH = reaper.ImGui_InputText(ctx, '##vpath', VERTEX_KEY_PATH or ''); ed(rv)
       elseif CONN_MODE == 'gateway' then
-        SUI.field(ctx, 'Gateway URL', 108)
+        SUI.field(ctx, 'LLM URL', 108)
         rv, GEMINI_BASE_URL = reaper.ImGui_InputText(ctx, '##gwurl', GEMINI_BASE_URL or ''); ed(rv)
-        SUI.field(ctx, 'Bearer key', 108)
+        SUI.field(ctx, 'LLM API key', 108)
         rv, GEMINI_KEY = reaper.ImGui_InputText(ctx, '##gwkey', GEMINI_KEY or '', pw); ed(rv)
       end
 
@@ -3128,15 +3547,16 @@ local function ui_pane_connection(ctx)
     end
   else
     SUI.wrap(ctx, SUI.col.faint,
-      'OpenAI-compatible API base: the host, or the host plus /v1. The client '
-      .. 'appends /v1/chat/completions itself, so leave that path off — and do '
-      .. 'not paste the chat UI address. Example: http://172.18.1.17:14005')
+      'Your own OpenAI-compatible LLM. Paste the base address — the host, or '
+      .. 'the host plus /v1 — not the chat page. Samanvaya adds '
+      .. '/v1/chat/completions itself. Pick the model from the list the '
+      .. 'endpoint returns above. Example: http://172.18.1.17:14005')
   end
   if CONN_MODE ~= 'server' then
     SUI.gap(ctx, 6)
     SUI.wrap(ctx, SUI.col.faint,
-      'Transcription always uses ElevenLabs. Gemini only does the matching — '
-      .. 'it never sees the audio.')
+      'ElevenLabs turns the audio into text. The LLM only reads that text to '
+      .. 'match lines — it never hears the audio.')
   end
 end
 
@@ -3372,110 +3792,89 @@ end
 
 
 local function ui_pane_run(ctx)
-  if not (_st.running or #_log_buffer > 0) then
-    SUI.empty(ctx, 'No run yet',
-      'Set the tracks and the connection, then press Start sync. Progress '
-      .. 'appears here, the worker log on the next page, and REAPER stays '
-      .. 'usable throughout.')
-    return
-  end
+  SUI.phase_strip(ctx)
+  SUI.gap(ctx, 8)
 
   if _st.running then
     local elapsed = os.time() - _poll_start_time
-    SUI.text(ctx, SUI.col.accent, _spinner_glyph() .. '   Running')
+    SUI.text(ctx, SUI.col.dub, _spinner_glyph() .. '   Running')
     reaper.ImGui_SameLine(ctx, 0, 14)
     local clock = SUI.mmss(elapsed) .. ' elapsed'
     if _ui_progress > 0.05 and _ui_progress < 0.99 then
-      clock = clock .. '   ·   ETA ~'
-        .. SUI.mmss(elapsed * (1.0 - _ui_progress) / _ui_progress)
+      clock = clock .. '   ·   about '
+        .. SUI.mmss(elapsed * (1.0 - _ui_progress) / _ui_progress) .. ' left'
     end
     SUI.text(ctx, SUI.col.dim, clock)
     SUI.gap(ctx, 2)
-    SUI.bar(ctx, _ui_progress, -52, 9)
+    SUI.bar(ctx, _ui_progress, -52, 8)
     reaper.ImGui_SameLine(ctx, 0, 10)
     SUI.text(ctx, SUI.col.dim, string.format('%.0f%%', _ui_progress * 100))
-    SUI.gap(ctx, 4)
+  elseif _ui_phase == 'success' then
+    SUI.text(ctx, SUI.col.ok, _ui_result or 'Run complete.')
+  elseif _ui_phase == 'failure' then
+    SUI.text(ctx, SUI.col.err, _ui_cancelled and 'Cancelled. The timeline was not touched.'
+                                             or 'The run stopped. The log below says why.')
+  elseif _st.can_start and _st.tracks_ok then
+    SUI.text(ctx, SUI.col.dim, string.format(
+      'Ready: %d VO clips, %d dub clips. Press Start sync.', _st.en, _st.dub))
+  else
+    SUI.text(ctx, SUI.col.warn, 'Not ready yet. Needs: '
+      .. (#_st.missing > 0 and table.concat(_st.missing, ', ') or 'items on the tracks'))
+  end
+  SUI.text(ctx, SUI.col.faint, _st.footnote)
+  SUI.gap(ctx, 8)
 
-    local open = SUI.card_begin(ctx, '##c_steps', 132)
-    if open then
-      local steps = {
-        { 'Collect', 'reading items, writing the run config' },
-        { 'Match',   'transcribing, then aligning with Gemini' },
-        { 'Place',   'moving dub items onto their positions' },
-      }
-      for i, s in ipairs(steps) do
-        local done, active = (_ui_step_idx > i), (_ui_step_idx == i)
-        local col = done and SUI.col.ok or (active and SUI.col.accent or SUI.col.faint)
-        SUI.text(ctx, col, (done and '✓' or tostring(i)) .. '   ' .. s[1])
-        reaper.ImGui_SameLine(ctx, 96)
-        SUI.text(ctx, (done or active) and SUI.col.dim or SUI.col.faint, s[2])
+  -- The timeline, lit up as far as transcription has got.
+  local open = SUI.card_begin(ctx, '##c_lanes', 160)
+  if open then
+    SUI.eyebrow(ctx, 'Timeline')
+    SUI.gap(ctx, 3)
+    local lit = nil
+    if _st.running and _ui_step_idx <= 2 then
+      lit = { _ui_en_done, _ui_dub_done, nil }
+    end
+    SUI.timeline(ctx, 92, lit)
+
+    if _st.running and _ui_step_idx == 2 then
+      SUI.gap(ctx, 6)
+      local function meter(label, n, total)
+        if total <= 0 then return end
+        SUI.text(ctx, SUI.col.dim, label)
+        reaper.ImGui_SameLine(ctx, 170)
+        SUI.bar(ctx, n / total, 170, 6)
+        reaper.ImGui_SameLine(ctx, 0, 10)
+        SUI.text(ctx, SUI.col.faint, string.format('%d / %d', n, total))
       end
-
-      if _ui_step_idx == 2 then
-        SUI.gap(ctx, 4)
-        local function meter(label, n, total)
-          if total <= 0 then return end
-          SUI.text(ctx, SUI.col.dim, label)
-          reaper.ImGui_SameLine(ctx, 170)
-          SUI.bar(ctx, n / total, 170, 7)
-          reaper.ImGui_SameLine(ctx, 0, 10)
-          SUI.text(ctx, SUI.col.faint, string.format('%d / %d', n, total))
-        end
-        meter('VO clips transcribed',  _ui_en_done,  _ui_en_total)
-        meter('Dub clips transcribed', _ui_dub_done, _ui_dub_total)
-        if     _poll_step_phase == 3 then
-          SUI.text(ctx, SUI.col.accent, 'Waiting for the matcher to answer…')
-        elseif _poll_step_phase == 4 then
-          SUI.text(ctx, SUI.col.accent, 'Placing clips on the timeline…')
-        end
-
-        -- Slow and hung look identical without this. Every Python phase
-        -- reports on a timer, so a long silence is a genuine stall.
-        local quiet = os.time() - _poll_last_change
-        if quiet >= 60 then
-          SUI.text(ctx, quiet >= 240 and SUI.col.err or SUI.col.warn,
-            string.format('No output for %s%s', SUI.mmss(quiet),
-              quiet >= 240 and '  —  may be stalled' or ''))
-        end
+      meter('VO clips transcribed',  _ui_en_done,  _ui_en_total)
+      meter('Dub clips transcribed', _ui_dub_done, _ui_dub_total)
+      if     _poll_step_phase == 3 then
+        SUI.text(ctx, SUI.col.dub, 'Waiting for the LLM to match the lines…')
+      elseif _poll_step_phase == 4 then
+        SUI.text(ctx, SUI.col.dub, 'Placing clips on the timeline…')
+      end
+      -- Slow and hung look identical without this. Every Python phase
+      -- reports on a timer, so a long silence is a genuine stall.
+      local quiet = os.time() - _poll_last_change
+      if quiet >= 60 then
+        SUI.text(ctx, quiet >= 240 and SUI.col.err or SUI.col.warn,
+          string.format('No output for %s%s', SUI.mmss(quiet),
+            quiet >= 240 and '  —  may be stalled' or ''))
       end
     end
-    SUI.card_end(ctx, open)
-    SUI.gap(ctx, 4)
   end
-
-  -- The log lives on its own page. Squeezing it under the steps left it a
-  -- few lines tall with its footer crowding the action bar, so what stays
-  -- here is the last line and the way through to the full page.
-  SUI.eyebrow(ctx, 'Worker log')
-  SUI.gap(ctx, 2)
-  local last = _log_buffer[#_log_buffer]
-  if last then
-    if _ui_font then pcall(reaper.ImGui_PushFont, ctx, _ui_font, 12) end
-    SUI.text(ctx, SUI.log_colour(last), last)
-    if _ui_font then pcall(reaper.ImGui_PopFont, ctx) end
-  else
-    SUI.text(ctx, SUI.col.faint, 'Nothing logged yet.')
-  end
-  SUI.gap(ctx, 2)
-  if reaper.ImGui_SmallButton(ctx, string.format('Open log  (%d lines)', #_log_buffer)) then
-    _ui_nav = 'log'
-  end
+  SUI.card_end(ctx, open)
 end
 
 
--- ─── The worker log, full page ────────────────────────────
+-- ─── The worker log, as a drawer ──────────────────────────
 -- A log you can only scroll is a wall. The one thing you actually want out
--- of a three-minute run is the clip that went wrong, so the page carries a
--- level filter, a text filter and a time gutter — and nothing else.
-local function ui_pane_log(ctx)
+-- of a three-minute run is the clip that went wrong, so the open drawer
+-- carries a level filter, a text filter and a time gutter — and nothing else.
+local function ui_log_body(ctx)
   if #_log_buffer == 0 then
-    SUI.empty(ctx, 'Nothing logged yet',
-      'Once a run starts, every line the Python worker prints lands here — '
-      .. 'transcription, matching, and placement, as they happen.')
-    if _ui_font_note then
-      SUI.gap(ctx, 6)
-      SUI.text(ctx, SUI.col.faint, _ui_font_note)
-    end
+    SUI.text(ctx, SUI.col.faint,
+      'Every line the Python worker prints lands here as it happens.')
+    if _ui_font_note then SUI.text(ctx, SUI.col.faint, _ui_font_note) end
     return
   end
 
@@ -3579,6 +3978,53 @@ local function ui_pane_log(ctx)
 end
 
 
+-- The drawer itself: a one-line header that always shows the newest line,
+-- and the full filterable log underneath when it is open.
+local function ui_log_drawer(ctx)
+  local open = SUI.pane(ctx, '##drawer', -1, 0, SUI.col.rail, 16.0, 9.0, 14.0)
+  if open then
+    local okp, x0, y0 = pcall(reaper.ImGui_GetCursorScreenPos, ctx)
+    local ww = reaper.ImGui_GetWindowWidth(ctx)
+    local BW = 74
+
+    if reaper.ImGui_AlignTextToFramePadding then
+      pcall(reaper.ImGui_AlignTextToFramePadding, ctx)
+    end
+    SUI.eyebrow(ctx, 'Log')
+    reaper.ImGui_SameLine(ctx, 0, 14)
+    local okc, lx = pcall(reaper.ImGui_GetCursorScreenPos, ctx)
+
+    -- Newest line, clipped to the room left of the button.
+    local last = _log_buffer[#_log_buffer]
+    if okc and type(lx) == 'number' and okp and type(x0) == 'number' then
+      local dl = reaper.ImGui_GetWindowDrawList(ctx)
+      local wx = reaper.ImGui_GetWindowPos(ctx)
+      local right = wx + ww - 16 - BW - 12
+      local okt, _, th = pcall(reaper.ImGui_CalcTextSize, ctx, 'Ag')
+      th = (okt and type(th) == 'number') and th or 14
+      pcall(reaper.ImGui_DrawList_PushClipRect, dl, lx, y0, right, y0 + 26, true)
+      pcall(reaper.ImGui_DrawList_AddText, dl, lx, y0 + (26 - th) * 0.5,
+        last and SUI.log_colour(last) or SUI.col.faint,
+        last and (last:gsub('^%s+', '')) or 'Nothing logged yet.')
+      pcall(reaper.ImGui_DrawList_PopClipRect, dl)
+    end
+
+    reaper.ImGui_SameLine(ctx)
+    reaper.ImGui_SetCursorPosX(ctx, math.max(120, ww - 16 - BW))
+    reaper.ImGui_SetCursorPosY(ctx, reaper.ImGui_GetCursorPosY(ctx) - 1)
+    if SUI.cta(ctx, (SUI.drawer_open and 'Close' or 'Open') .. '##drawer', BW, 26, 'ghost') then
+      SUI.drawer_open = not SUI.drawer_open
+    end
+
+    if SUI.drawer_open then
+      SUI.gap(ctx, 4)
+      ui_log_body(ctx)
+    end
+  end
+  SUI.pane_end(ctx, open)
+end
+
+
 local function ui_pane_results(ctx)
   if _ui_phase == 'failure' then
     SUI.big(ctx, SUI.col.err, _ui_cancelled and '■  Cancelled' or '✗  Sync failed', 18)
@@ -3643,8 +4089,9 @@ local function ui_pane_results(ctx)
 
   if unmatched > 0 then
     SUI.wrap(ctx, SUI.col.warn, string.format(
-      '%d clip%s could not be placed and %s waiting on the "%s" track. Hover '
-      .. 'one, select the VO item it belongs to, and run Sync_Item.lua.',
+      '%d clip%s could not be placed and %s waiting on the "%s" track. Click '
+      .. 'a row to select it, then select the VO item it belongs to and run '
+      .. 'Sync_Item.lua.',
       unmatched, unmatched == 1 and '' or 's',
       unmatched == 1 and 'is' or 'are', TRACK_UNSYNC))
   else
@@ -3676,7 +4123,7 @@ local function ui_pane_results(ctx)
     local rv
     rv, _ui_row_filter = reaper.ImGui_InputText(ctx, '##rowfilter', _ui_row_filter or '')
     if reaper.ImGui_IsItemHovered(ctx) then
-      reaper.ImGui_SetTooltip(ctx, 'Filter by clip number or status (e.g. "unmatched")')
+      reaper.ImGui_SetTooltip(ctx, 'Filter by clip number or status (e.g. "parked")')
     end
     SUI.gap(ctx, 2)
 
@@ -3695,27 +4142,51 @@ local function ui_pane_results(ctx)
     -- BeginTable takes no NoScrollbar, so the inner window's bar is starved
     -- of width instead. Same result: wheel scrolling, nothing drawn.
     reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ScrollbarSize(), 0.0)
-    if reaper.ImGui_BeginTable(ctx, '##results', 3, tf, 0, -1) then
-      reaper.ImGui_TableSetupColumn(ctx, 'Dub clip')
+    if reaper.ImGui_BeginTable(ctx, '##results', 5, tf, 0, -1) then
+      reaper.ImGui_TableSetupColumn(ctx, 'Clip')
       reaper.ImGui_TableSetupColumn(ctx, 'Status')
-      reaper.ImGui_TableSetupColumn(ctx, 'New position')
+      reaper.ImGui_TableSetupColumn(ctx, 'Was at')
+      reaper.ImGui_TableSetupColumn(ctx, 'Now at')
+      reaper.ImGui_TableSetupColumn(ctx, 'Moved')
       reaper.ImGui_TableHeadersRow(ctx)
+      local span = reaper.ImGui_SelectableFlags_SpanAllColumns
+                   and reaper.ImGui_SelectableFlags_SpanAllColumns() or 0
+      local function t(x) return x and SUI.mmss(x) .. string.format('.%d', math.floor((x % 1) * 10)) or '—' end
       local needle = (_ui_row_filter or ''):lower()
       for _, r in ipairs(_ui_results_rows) do
-        local hay = tostring(r.dub_id or '') .. ' ' .. tostring(r.status or '')
+        local word = (r.status == 'matched') and 'placed'
+          or (r.status == 'missing_file' and 'no audio' or 'parked')
+        local hay = tostring(r.dub_id or '') .. ' ' .. tostring(r.status or '') .. ' ' .. word
         if needle == '' or hay:lower():find(needle, 1, true) then
           reaper.ImGui_TableNextRow(ctx)
           reaper.ImGui_TableSetColumnIndex(ctx, 0)
-          SUI.text(ctx, SUI.col.dim, '#' .. tostring(r.dub_id or '?'))
+          -- The whole row is a button: it selects that item in REAPER and
+          -- puts the edit cursor on it, so "which one was parked" is one click.
+          if reaper.ImGui_Selectable(ctx, string.format('#%d##row%d', r.dub_id or 0, r.dub_id or 0),
+                                     false, span) then
+            if r.item and reaper.ValidatePtr2 and reaper.ValidatePtr2(0, r.item, 'MediaItem*') then
+              reaper.Main_OnCommand(40289, 0)          -- unselect all items
+              reaper.SetMediaItemSelected(r.item, true)
+              reaper.SetEditCurPos(reaper.GetMediaItemInfo_Value(r.item, 'D_POSITION'), true, false)
+              reaper.UpdateArrange()
+            end
+          end
           reaper.ImGui_TableSetColumnIndex(ctx, 1)
-          local col = SUI.col.dim
-          if     r.status == 'matched'      then col = SUI.col.ok
-          elseif r.status == 'unmatched'    then col = SUI.col.warn
+          local col = SUI.col.ok
+          if     r.status == 'unmatched'    then col = SUI.col.warn
           elseif r.status == 'missing_file' then col = SUI.col.err end
-          SUI.text(ctx, col, r.status or '-')
+          SUI.text(ctx, col, word)
           reaper.ImGui_TableSetColumnIndex(ctx, 2)
-          SUI.text(ctx, SUI.col.dim,
-            r.new_position and string.format('%.3f s', r.new_position) or '—')
+          SUI.text(ctx, SUI.col.faint, t(r.old_position))
+          reaper.ImGui_TableSetColumnIndex(ctx, 3)
+          SUI.text(ctx, SUI.col.text, t(r.new_position))
+          reaper.ImGui_TableSetColumnIndex(ctx, 4)
+          if r.old_position and r.new_position then
+            local d = r.new_position - r.old_position
+            SUI.text(ctx, SUI.col.dim, string.format('%+.1f s', d))
+          else
+            SUI.text(ctx, SUI.col.faint, '—')
+          end
         end
       end
       reaper.ImGui_EndTable(ctx)
@@ -3727,15 +4198,16 @@ end
 
 
 -- ─── The detail pane: header, then whichever section is selected ──
-local function ui_detail(ctx)
-  local open = SUI.pane(ctx, '##detail', -1, -FOOT_H, 0x00000000, 16.0, 12.0)
+local function ui_detail(ctx, h)
+  if _ui_nav == 'log' then SUI.drawer_open = true; _ui_nav = 'run' end
+  local open = SUI.pane(ctx, '##detail', -1, h, 0x00000000, 18.0, 14.0)
   if open then
     -- Studio drops the little gradient rule that used to sit above the
     -- title: the rail's node and the primary button already carry the
     -- ramp, and a third instance three lines apart was one too many. The
     -- title carries the hierarchy on its own at this size.
     local head = PANE_HEAD[_ui_nav] or PANE_HEAD.session
-    SUI.big(ctx, SUI.col.white, head[1], 21)
+    SUI.big(ctx, SUI.col.white, head[1], 23)
     SUI.gap(ctx, 1)
     SUI.text(ctx, SUI.col.dim, head[2])
     SUI.gap(ctx, 7)
@@ -3765,115 +4237,11 @@ local function ui_detail(ctx)
     elseif _ui_nav == 'connection' then ui_pane_connection(ctx)
     elseif _ui_nav == 'script'     then ui_pane_script(ctx)
     elseif _ui_nav == 'run'        then ui_pane_run(ctx)
-    elseif _ui_nav == 'log'        then ui_pane_log(ctx)
     elseif _ui_nav == 'results'    then ui_pane_results(ctx)
     end
   end
   SUI.pane_end(ctx, open)
 end
-
-
--- ─── The action bar: one row, contextual to what the engine is doing ──
---
--- Three slots share one row: the primary button, a two-line status block and
--- Close pinned to the right edge. They are three different heights, so each
--- is centred against the tallest of them rather than hung from the top of
--- the row — top-aligned, the 34px buttons rode a few pixels above the middle
--- of a two-line status and the bar read as hand-placed. Close is measured off
--- the content region (not the window width) so it keeps its margin whether or
--- not a scrollbar is out, and the status block is given a hard width budget
--- so a long "Still needed:" line wraps instead of sliding under it.
-local function ui_footbar(ctx, on_start, on_close)
-  local open = SUI.pane(ctx, '##foot', -1, 0, SUI.col.rail, 16.0, 10.0, 16.0)
-  if open then
-    -- The phase decides what the button says and does; the geometry below is
-    -- the same in all three cases.
-    local label, btn_w, tone, act, disabled
-    local head_col, head
-
-    if _st.running then
-      label, btn_w, tone, act = 'Cancel run', 126, 'danger', cancel_python
-      head_col = SUI.col.accent
-      head     = string.format('%s  Matching — %.0f%%',
-                               _spinner_glyph(), _ui_progress * 100)
-
-    elseif _st.finished then
-      label, btn_w, act = 'Sync again', 128, function()
-        _ui_phase = 'setup'; _ui_failure = nil
-        _ui_step_idx = 0; _ui_progress = 0.0
-        _ui_en_total = 0; _ui_dub_total = 0; _ui_en_done = 0; _ui_dub_done = 0
-        _poll_step_phase = 0; _ui_cancelled = false
-        _ui_results_rows = {}; _ui_summary = nil; _ui_row_filter = ''
-        log_clear(); _ui_result = nil
-      end
-      head_col = (_ui_phase == 'success') and SUI.col.ok or SUI.col.err
-      head     = _ui_result
-        or (_ui_phase == 'success' and 'Run complete.' or 'Run stopped.')
-
-    else
-      label, btn_w, act = '▶  Start sync', 142, on_start
-      disabled = not _st.can_start
-      if not _st.can_start then
-        head_col = SUI.col.warn
-        head     = 'Still needed:  ' .. table.concat(_st.missing, ',  ')
-      elseif not _st.tracks_ok then
-        head_col = SUI.col.warn
-        head     = 'Track names are set, but REAPER has no items on them yet.'
-      else
-        head_col = SUI.col.ok
-        head     = string.format('Ready — %d VO clips, %d dub clips.',
-                                 _st.en, _st.dub)
-      end
-    end
-
-    local BTN_H, CLOSE_H, CLOSE_W, GAP = 38, 32, 90, 14
-    local text_h = reaper.ImGui_GetTextLineHeight(ctx) * 2 + 5  -- two lines, pane spacing
-    local row_h  = math.max(BTN_H, text_h)
-    local left   = reaper.ImGui_GetCursorPosX(ctx)
-    local top    = reaper.ImGui_GetCursorPosY(ctx)
-    local avail, avail_h = reaper.ImGui_GetContentRegionAvail(ctx)
-
-    -- The row is centred in the BAR, then each piece is centred in the row.
-    -- Two steps, because they are different measurements: the row is only as
-    -- tall as its tallest item, so centring against that alone leaves the
-    -- whole row hanging from the top of the bar with all the slack underneath
-    -- it — which is exactly what it did while the bar was 68px and the button
-    -- 34. Now that the bar is 72 and the pill 38 there are 14px of slack, and
-    -- hanging the row off the top puts all of it in one place.
-    local slack = 0
-    if type(avail_h) == 'number' and avail_h > row_h then
-      slack = math.floor((avail_h - row_h) * 0.5)
-    end
-
-    -- Drop something `h` tall onto the vertical centre of the row.
-    local function centre(h)
-      reaper.ImGui_SetCursorPosY(ctx,
-        top + slack + math.floor((row_h - h) * 0.5))
-    end
-
-    centre(BTN_H)
-    _ui_begin_disabled(ctx, disabled == true)
-    if SUI.cta(ctx, label, btn_w, BTN_H, tone, disabled == true) then act() end
-    _ui_end_disabled(ctx)
-
-    reaper.ImGui_SameLine(ctx, 0, GAP)
-    centre(text_h)
-    reaper.ImGui_BeginGroup(ctx)
-    reaper.ImGui_PushTextWrapPos(ctx,
-      math.max(left + btn_w + GAP + 90, left + avail - CLOSE_W - GAP))
-    SUI.text(ctx, head_col, head)
-    SUI.text(ctx, SUI.col.faint, _st.footnote)
-    reaper.ImGui_PopTextWrapPos(ctx)
-    reaper.ImGui_EndGroup(ctx)
-
-    reaper.ImGui_SameLine(ctx, 0, 0)
-    reaper.ImGui_SetCursorPosX(ctx, left + avail - CLOSE_W)
-    centre(CLOSE_H)
-    if SUI.cta(ctx, 'Close', CLOSE_W, CLOSE_H, 'ghost') then on_close() end
-  end
-  SUI.pane_end(ctx, open)
-end
-
 
 
 -- ═══════════════════════════════════════════════════════════
@@ -4348,10 +4716,18 @@ local function render_active_phase(ctx, on_close)
   -- frame and each region keeps its own rounded corners.
   reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing(),
     SHELL_PAD, SHELL_PAD)
-  ui_rail(ctx)
+  ui_rail(ctx, start_sync_run)
   reaper.ImGui_SameLine(ctx, 0, SHELL_PAD)
-  ui_detail(ctx)
-  ui_footbar(ctx, start_sync_run, on_close)
+  -- Right-hand column: the page, and the log drawer under it. Shut, the
+  -- drawer is one line; open, it takes a little under half the column.
+  reaper.ImGui_BeginGroup(ctx)
+  local _, avail_h = reaper.ImGui_GetContentRegionAvail(ctx)
+  avail_h = (type(avail_h) == 'number') and avail_h or 480
+  local drawer_h = SUI.drawer_open and math.max(200, math.floor(avail_h * 0.45))
+                   or SUI.DRAWER_SHUT
+  ui_detail(ctx, -(drawer_h + SHELL_PAD))
+  ui_log_drawer(ctx)
+  reaper.ImGui_EndGroup(ctx)
   reaper.ImGui_PopStyleVar(ctx)
 
   -- Last, and outside the three regions: a modal opened from inside one of
@@ -4524,9 +4900,9 @@ local function main()
     -- Both move up again now that the three panes actually honour their own
     -- inner padding: that is 24px of height the rail no longer has for its
     -- spine, and 32px of width the detail pane no longer has for its card.
-    reaper.ImGui_SetNextWindowSize(_ui_ctx, 772, 548, reaper.ImGui_Cond_FirstUseEver())
+    reaper.ImGui_SetNextWindowSize(_ui_ctx, 920, 640, reaper.ImGui_Cond_FirstUseEver())
     if reaper.ImGui_SetNextWindowSizeConstraints then
-      pcall(reaper.ImGui_SetNextWindowSizeConstraints, _ui_ctx, 692, 508, 1e9, 1e9)
+      pcall(reaper.ImGui_SetNextWindowSizeConstraints, _ui_ctx, 780, 580, 1e9, 1e9)
     end
 
     -- The theme wraps Begin/End: WindowBg and WindowRounding are style state,
@@ -4559,7 +4935,8 @@ local function main()
     local visible, open = reaper.ImGui_Begin(_ui_ctx,
       'Samanvaya' .. (_APP_VERSION ~= '' and ('  ·  v' .. _APP_VERSION) or '')
       .. '###samanvaya',
-      true, reaper.ImGui_WindowFlags_NoCollapse() | SUI.NOSB)
+      SUI.native_close and true or nil, reaper.ImGui_WindowFlags_NoCollapse() | SUI.NOSB)
+    if open == nil then open = true end
     reaper.ImGui_PopStyleVar(_ui_ctx, 2)
     if title_font then pcall(reaper.ImGui_PopFont, _ui_ctx) end
     -- Outside the `visible` guard: a fully off-screen window can report
@@ -4570,6 +4947,11 @@ local function main()
         poll_python_step()   -- refresh log/progress before rendering
       end
       render_active_phase(_ui_ctx, close_window)
+      -- Guarded: if painting the close ever fails, ImGui's own close comes
+      -- back on the next frame instead of the script stopping.
+      if not pcall(SUI.close_x, _ui_ctx, TITLE_PX + TITLE_PAD_Y * 2, close_window) then
+        SUI.native_close, SUI._api_missing = true, true
+      end
     end
     reaper.ImGui_End(_ui_ctx)   -- always paired with Begin()
     SUI.pop_theme(_ui_ctx)

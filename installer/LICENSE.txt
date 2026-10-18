@@ -1,0 +1,41 @@
+SAMANVAYA - END USER LICENSE AGREEMENT
+
+Please read this agreement carefully before installing Samanvaya.
+By clicking "I accept the agreement" and installing the software, you
+agree to these terms. If you do not agree, click Cancel.
+
+1. LICENSE
+   You may install and use Samanvaya on computers you own or control,
+   for your own work, including commercial work.
+
+2. RESTRICTIONS
+   You may not sell, rent or redistribute Samanvaya, in whole or in
+   part, or present it as your own product, without written permission
+   from the author.
+
+3. THIRD-PARTY SERVICES
+   Samanvaya sends audio and text to third-party services (for example
+   ElevenLabs and Google Gemini) using API keys that you provide. Your
+   use of those services is governed by their own terms and pricing.
+   You are responsible for any charges they bill to your keys.
+
+4. YOUR DATA
+   API keys and settings are stored only on this computer, in the
+   Samanvaya folder inside REAPER's Scripts folder. They are kept when
+   you update or uninstall Samanvaya, so delete that folder yourself if
+   you want them gone.
+
+5. BUNDLED COMPONENTS
+   This installer includes the Python runtime (Python Software
+   Foundation License) and open-source Python packages, each under its
+   own license. REAPER is a product of Cockos Incorporated and is not
+   included.
+
+6. NO WARRANTY
+   Samanvaya is provided "as is", without warranty of any kind. Always
+   keep backups of your REAPER projects. The author is not liable for
+   any loss of data, time or money arising from its use.
+
+7. TERMINATION
+   This license ends automatically if you break these terms. On
+   termination you must uninstall Samanvaya.
