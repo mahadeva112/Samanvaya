@@ -34,6 +34,12 @@ rights and no Python. It installs into `%APPDATA%\REAPER\Scripts\Samanvaya`
 `Samanvaya.lua` to REAPER's Action List. Close REAPER before you run it.
 Your API keys stay in place across updates and uninstalls.
 
+Setup also asks for a keyboard shortcut that opens Samanvaya (**A** by
+default, with optional Ctrl/Alt/Shift). If you already use that key for
+another action in REAPER, it asks before taking it. An update offers the
+shortcut you have now, and uninstall removes it. For a silent install, pass
+`/SHORTCUT=Ctrl+Shift+A` or `/SHORTCUT=none`.
+
 To build that exe (needs Python 3.12 and Inno Setup 6 on the build machine):
 
 ```bash
