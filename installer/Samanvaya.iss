@@ -115,11 +115,24 @@ const
   FlagAlt   = 16;
   KeyCount  = 48;   { A-Z, 0-9, F1-F12 }
 
+  { Shortcut page colours (TColor is $BBGGRR), matching the wizard art. }
+  ColCard    = $100C0A;
+  ColCap     = $F2EFEC;
+  ColCapEdge = $77716C;
+  ColCapText = $201A16;
+  ColTeal    = $BFD42D;
+  ColAmber   = $0B9EF5;
+  ColMuted   = $9A948E;
+
 var
   ShortcutPage: TWizardPage;
   ShortcutBox, CtrlBox, AltBox, ShiftBox: TNewCheckBox;
   KeyCombo: TNewComboBox;
-  PreviewText: TNewStaticText;
+  Card: TPanel;
+  Caps, CapEdges: array[0..3] of TPanel;
+  Pluses: array[0..2] of TNewStaticText;
+  NoKeyText, StatusText, FolderText: TNewStaticText;
+  CurrentKb: AnsiString;     { reaper-kb.ini of the chosen folder, for the live check }
   PrefilledFor: String;      { the folder whose reaper-kb.ini filled the page }
   ExistingShortcut: String;  { what Samanvaya is bound to there now, if anything }
   ReplaceOk: Boolean;        { the user agreed to take the key from another action }
@@ -376,18 +389,109 @@ begin
     Result := 'none';
 end;
 
+function CapWidth(Text: String): Integer;
+begin
+  Result := ScaleX(26 + 10 * Length(Text));
+  if Result < ScaleX(44) then
+    Result := ScaleX(44);
+end;
+
+procedure CenterInCard(Text: TNewStaticText);
+begin
+  Text.Left := (Card.Width - Text.Width) div 2;
+end;
+
+{ Draws the chosen keys as keycaps, centred in the card. }
+procedure LayoutCaps();
+var
+  Texts: array[0..3] of String;
+  N, I, X, W, Total, PlusW, CapTop, CapH: Integer;
+begin
+  N := 0;
+  if ShortcutBox.Checked then
+  begin
+    if CtrlBox.Checked then begin Texts[N] := 'Ctrl'; N := N + 1; end;
+    if AltBox.Checked then begin Texts[N] := 'Alt'; N := N + 1; end;
+    if ShiftBox.Checked then begin Texts[N] := 'Shift'; N := N + 1; end;
+    Texts[N] := KeyName(KeyCombo.ItemIndex);
+    N := N + 1;
+  end;
+
+  PlusW := ScaleX(24);
+  CapTop := ScaleY(34);
+  CapH := ScaleY(36);
+  Total := 0;
+  for I := 0 to N - 1 do
+    Total := Total + CapWidth(Texts[I]);
+  if N > 1 then
+    Total := Total + (N - 1) * PlusW;
+  X := (Card.Width - Total) div 2;
+
+  for I := 0 to 3 do
+  begin
+    Caps[I].Visible := I < N;
+    CapEdges[I].Visible := I < N;
+    if I < 3 then
+      Pluses[I].Visible := I < N - 1;
+    if I < N then
+    begin
+      W := CapWidth(Texts[I]);
+      Caps[I].Caption := Texts[I];
+      Caps[I].Left := X;
+      Caps[I].Top := CapTop;
+      Caps[I].Width := W;
+      Caps[I].Height := CapH;
+      { A darker slab just below the cap gives it a pressed-key edge. }
+      CapEdges[I].Left := X;
+      CapEdges[I].Top := CapTop + ScaleY(4);
+      CapEdges[I].Width := W;
+      CapEdges[I].Height := CapH;
+      X := X + W;
+      if I < N - 1 then
+      begin
+        Pluses[I].Left := X + (PlusW - Pluses[I].Width) div 2;
+        Pluses[I].Top := CapTop + (CapH - Pluses[I].Height) div 2;
+        X := X + PlusW;
+      end;
+    end;
+  end;
+  NoKeyText.Visible := N = 0;
+end;
+
 procedure UpdateShortcutPage();
+var
+  Owner: String;
 begin
   CtrlBox.Enabled := ShortcutBox.Checked;
   AltBox.Enabled := ShortcutBox.Checked;
   ShiftBox.Enabled := ShortcutBox.Checked;
   KeyCombo.Enabled := ShortcutBox.Checked;
-  if ShortcutBox.Checked then
-    PreviewText.Caption := 'Samanvaya will open with:  ' + ShortcutText(ChosenFlags(), ChosenVk())
-  else if ExistingShortcut <> '' then
-    PreviewText.Caption := 'Samanvaya keeps the shortcut it already has:  ' + ExistingShortcut
-  else
-    PreviewText.Caption := 'No shortcut. Samanvaya stays in Actions > Show action list.';
+  LayoutCaps();
+
+  if not ShortcutBox.Checked then
+  begin
+    StatusText.Font.Color := ColMuted;
+    if ExistingShortcut <> '' then
+      StatusText.Caption := 'Samanvaya keeps the shortcut it has now: ' + ExistingShortcut
+    else
+      StatusText.Caption := 'Run it from Actions > Show action list';
+  end else
+  begin
+    Owner := KeyOwner(CurrentKb, ChosenFlags(), ChosenVk());
+    if Owner <> '' then
+    begin
+      StatusText.Font.Color := ColAmber;
+      StatusText.Caption := 'Already used by ' + ActionName(CurrentKb, Owner) + '. Setup will ask first.';
+    end else
+    begin
+      StatusText.Font.Color := ColTeal;
+      if ShortcutText(ChosenFlags(), ChosenVk()) = ExistingShortcut then
+        StatusText.Caption := 'This is Samanvaya''s shortcut now'
+      else
+        StatusText.Caption := 'Free in this REAPER';
+    end;
+  end;
+  CenterInCard(StatusText);
 end;
 
 procedure ShortcutChanged(Sender: TObject);
@@ -418,7 +522,7 @@ procedure PrefillShortcut();
 var
   Kb, Rest, Line: AnsiString;
   Enabled, Found: Boolean;
-  Flags, Vk: Integer;
+  Flags, Vk, ParamFlags, ParamVk: Integer;
 begin
   if PrefilledFor = WizardDirValue() then
     Exit;
@@ -426,6 +530,9 @@ begin
   ExistingShortcut := '';
   if not LoadStringFromFile(KbPath(), Kb) then
     Kb := '';
+  CurrentKb := Kb;
+  FolderText.Caption := 'REAPER folder:  ' +
+    MinimizePathName(WizardDirValue(), FolderText.Font, ShortcutPage.SurfaceWidth - ScaleX(100));
   Found := False;
   Rest := Kb;
   while (Length(Rest) > 0) and not Found do
@@ -440,8 +547,8 @@ begin
     end;
   end;
 
-  if ParseShortcut(ExpandConstant('{param:SHORTCUT|}'), Enabled, Flags, Vk) then
-    SetChoice(Enabled, Flags, Vk)
+  if ParseShortcut(ExpandConstant('{param:SHORTCUT|}'), Enabled, ParamFlags, ParamVk) then
+    SetChoice(Enabled, ParamFlags, ParamVk)
   else if Found and (IndexOfVk(Vk) >= 0) then
     SetChoice(True, Flags, Vk)
   else if Found or (Pos(CmdId, Kb) > 0) then
@@ -452,82 +559,128 @@ begin
     SetChoice(True, 1, 65);
 end;
 
+function CardText(Caption: String; Size: Integer; Color: TColor): TNewStaticText;
+begin
+  Result := TNewStaticText.Create(ShortcutPage);
+  Result.Parent := Card;
+  Result.Font.Name := 'Segoe UI';
+  Result.Font.Size := Size;
+  Result.Font.Color := Color;
+  Result.Caption := Caption;
+end;
+
+function ModifierBox(Caption: String; Left, Top: Integer): TNewCheckBox;
+begin
+  Result := TNewCheckBox.Create(ShortcutPage);
+  Result.Parent := ShortcutPage.Surface;
+  Result.Caption := Caption;
+  Result.Left := Left;
+  Result.Top := Top;
+  Result.Width := ScaleX(56);
+  Result.Height := ScaleY(17);
+  Result.OnClick := @ShortcutChanged;
+end;
+
 procedure CreateShortcutPage();
 var
-  Note, Plus: TNewStaticText;
+  Title, KeyLabel, Note: TNewStaticText;
   I, Y: Integer;
 begin
   ShortcutPage := CreateCustomPage(wpSelectDir, 'Keyboard shortcut',
-    'Choose the key that opens Samanvaya in REAPER.');
+    'Pick the key that opens Samanvaya in REAPER.');
 
+  { Dark card with the shortcut drawn as keycaps and a live status line. }
+  Card := TPanel.Create(ShortcutPage);
+  Card.Parent := ShortcutPage.Surface;
+  Card.Width := ShortcutPage.SurfaceWidth;
+  Card.Height := ScaleY(108);
+  Card.BevelOuter := bvNone;
+  Card.ParentBackground := False;
+  Card.Color := ColCard;
+
+  Title := CardText('SAMANVAYA OPENS WITH', 7, ColMuted);
+  Title.Font.Style := [fsBold];
+  Title.Top := ScaleY(10);
+  CenterInCard(Title);
+
+  for I := 0 to 3 do
+  begin
+    CapEdges[I] := TPanel.Create(ShortcutPage);
+    CapEdges[I].Parent := Card;
+    CapEdges[I].BevelOuter := bvNone;
+    CapEdges[I].ParentBackground := False;
+    CapEdges[I].Color := ColCapEdge;
+    Caps[I] := TPanel.Create(ShortcutPage);
+    Caps[I].Parent := Card;
+    Caps[I].BevelOuter := bvNone;
+    Caps[I].ParentBackground := False;
+    Caps[I].Color := ColCap;
+    Caps[I].Font.Name := 'Segoe UI';
+    Caps[I].Font.Size := 13;
+    Caps[I].Font.Style := [fsBold];
+    Caps[I].Font.Color := ColCapText;
+  end;
+  for I := 0 to 2 do
+  begin
+    Pluses[I] := CardText('+', 14, ColTeal);
+    Pluses[I].Font.Style := [fsBold];
+  end;
+
+  NoKeyText := CardText('No shortcut', 13, ColMuted);
+  NoKeyText.Top := ScaleY(40);
+  CenterInCard(NoKeyText);
+
+  StatusText := CardText('', 9, ColTeal);
+  StatusText.Top := ScaleY(82);
+
+  { Controls }
+  Y := Card.Top + Card.Height + ScaleY(14);
   ShortcutBox := TNewCheckBox.Create(ShortcutPage);
   ShortcutBox.Parent := ShortcutPage.Surface;
   ShortcutBox.Caption := 'Open Samanvaya with a keyboard shortcut';
+  ShortcutBox.Top := Y;
   ShortcutBox.Width := ShortcutPage.SurfaceWidth;
   ShortcutBox.Height := ScaleY(17);
   ShortcutBox.OnClick := @ShortcutChanged;
 
-  Y := ScaleY(36);
-  CtrlBox := TNewCheckBox.Create(ShortcutPage);
-  CtrlBox.Parent := ShortcutPage.Surface;
-  CtrlBox.Caption := 'Ctrl';
-  CtrlBox.Left := ScaleX(20);
-  CtrlBox.Top := Y + ScaleY(3);
-  CtrlBox.Width := ScaleX(60);
-  CtrlBox.Height := ScaleY(17);
-  CtrlBox.OnClick := @ShortcutChanged;
-
-  AltBox := TNewCheckBox.Create(ShortcutPage);
-  AltBox.Parent := ShortcutPage.Surface;
-  AltBox.Caption := 'Alt';
-  AltBox.Left := ScaleX(85);
-  AltBox.Top := CtrlBox.Top;
-  AltBox.Width := ScaleX(55);
-  AltBox.Height := ScaleY(17);
-  AltBox.OnClick := @ShortcutChanged;
-
-  ShiftBox := TNewCheckBox.Create(ShortcutPage);
-  ShiftBox.Parent := ShortcutPage.Surface;
-  ShiftBox.Caption := 'Shift';
-  ShiftBox.Left := ScaleX(145);
-  ShiftBox.Top := CtrlBox.Top;
-  ShiftBox.Width := ScaleX(60);
-  ShiftBox.Height := ScaleY(17);
-  ShiftBox.OnClick := @ShortcutChanged;
-
-  Plus := TNewStaticText.Create(ShortcutPage);
-  Plus.Parent := ShortcutPage.Surface;
-  Plus.Caption := '+';
-  Plus.Left := ScaleX(212);
-  Plus.Top := CtrlBox.Top;
+  Y := Y + ScaleY(28);
+  KeyLabel := TNewStaticText.Create(ShortcutPage);
+  KeyLabel.Parent := ShortcutPage.Surface;
+  KeyLabel.Caption := 'Key:';
+  KeyLabel.Left := ScaleX(18);
+  KeyLabel.Top := Y + ScaleY(3);
 
   KeyCombo := TNewComboBox.Create(ShortcutPage);
   KeyCombo.Parent := ShortcutPage.Surface;
   KeyCombo.Style := csDropDownList;
-  KeyCombo.Left := ScaleX(230);
+  KeyCombo.Left := ScaleX(50);
   KeyCombo.Top := Y;
-  KeyCombo.Width := ScaleX(80);
+  KeyCombo.Width := ScaleX(64);
   for I := 0 to KeyCount - 1 do
     KeyCombo.Items.Add(KeyName(I));
   KeyCombo.ItemIndex := 0;
   KeyCombo.OnChange := @ShortcutChanged;
 
-  PreviewText := TNewStaticText.Create(ShortcutPage);
-  PreviewText.Parent := ShortcutPage.Surface;
-  PreviewText.Top := ScaleY(84);
-  PreviewText.Font.Style := [fsBold];
+  CtrlBox := ModifierBox('Ctrl', ScaleX(140), Y + ScaleY(3));
+  AltBox := ModifierBox('Alt', ScaleX(200), Y + ScaleY(3));
+  ShiftBox := ModifierBox('Shift', ScaleX(256), Y + ScaleY(3));
+
+  Y := Y + ScaleY(34);
+  FolderText := TNewStaticText.Create(ShortcutPage);
+  FolderText.Parent := ShortcutPage.Surface;
+  FolderText.Top := Y;
+  FolderText.Font.Color := clGrayText;
 
   Note := TNewStaticText.Create(ShortcutPage);
   Note.Parent := ShortcutPage.Surface;
-  Note.Top := ScaleY(120);
+  Note.Top := Y + ScaleY(18);
   Note.Width := ShortcutPage.SurfaceWidth;
   Note.AutoSize := False;
   Note.WordWrap := True;
-  Note.Height := ScaleY(80);
-  Note.Caption := 'Setup warns you if a key you set yourself in REAPER is already on another action. ' +
-    'REAPER''s own default keys cannot be checked from here: if you pick one of those, ' +
-    'it opens Samanvaya instead.' + #13#10#13#10 +
-    'You can change the shortcut later in REAPER under Actions > Show action list.';
+  Note.Height := ShortcutPage.SurfaceHeight - Note.Top;
+  Note.Font.Color := clGrayText;
+  Note.Caption := 'REAPER''s built-in keys cannot be checked from here. If you pick one, it opens ' +
+    'Samanvaya instead. You can change the shortcut later in Actions > Show action list.';
 
   SetChoice(True, 1, 65);
 end;
@@ -626,11 +779,15 @@ end;
 
 procedure InitializeWizard();
 begin
-  { A portable REAPER keeps reaper.ini beside reaper.exe. If the usual
-    %APPDATA%\REAPER has none but a Program Files copy does, start there. }
-  if not FileExists(ExpandConstant('{userappdata}\REAPER\reaper.ini')) then
+  { The folder offered is the last install's, or %APPDATA%\REAPER. If it
+    holds no reaper.ini (the last install went to a folder that is gone or
+    was never REAPER's), fall back to %APPDATA%\REAPER, then to a portable
+    REAPER in Program Files, which keeps reaper.ini beside reaper.exe. }
+  if not FileExists(AddBackslash(WizardForm.DirEdit.Text) + 'reaper.ini') then
   begin
-    if FileExists(ExpandConstant('{autopf}\REAPER (x64)\reaper.ini')) then
+    if FileExists(ExpandConstant('{userappdata}\REAPER\reaper.ini')) then
+      WizardForm.DirEdit.Text := ExpandConstant('{userappdata}\REAPER')
+    else if FileExists(ExpandConstant('{autopf}\REAPER (x64)\reaper.ini')) then
       WizardForm.DirEdit.Text := ExpandConstant('{autopf}\REAPER (x64)')
     else if FileExists(ExpandConstant('{autopf}\REAPER\reaper.ini')) then
       WizardForm.DirEdit.Text := ExpandConstant('{autopf}\REAPER');
