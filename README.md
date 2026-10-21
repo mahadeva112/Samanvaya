@@ -80,13 +80,13 @@ run and walks you through installing it (it can even install ReaPack for you).
 
 ## The panel
 
-A rail down the left lists the five stages of the job, each with a one-line
-status under it ("6 VO · 6 dub", "Gateway · verified", "Optional"), so you can
-see what is set without opening anything. The page you pick fills the middle,
-and the worker log sits in a drawer along the bottom.
+A rail down the left holds the **API** button and the three stages of the
+job, each with a one-line status under it ("6 VO · 6 dub", "Gateway ·
+verified"), so you can see what is set without opening anything. The page you
+pick fills the middle, and the worker log sits in a drawer along the bottom.
 
-The foot of the rail holds the **Ready** card: a three-part meter (session,
-connection, and the optional script), then **Start sync**, with either what
+The foot of the rail holds the **Ready** card: a three-part meter (Tracks,
+API, and the optional Script), then **Start sync**, with either what
 is still missing or what the run will do underneath. It turns into **Cancel
 run** while a run is going and **Sync again** once one has finished. Because
 it lives in the rail, it is in reach from every page.
@@ -94,12 +94,10 @@ it lives in the rail, it is in reach from every page.
 The colours follow the job: teal is the VO lane, amber is the dub lane and the
 one action that moves it.
 
-**1 Session**: the two track names, the dub language, and where unplaced
-clips are parked. Below them, a lane view draws every item REAPER currently
-sees on those tracks, refreshed twice a second, so a wrong track name shows up
-here rather than three minutes into a run.
-
-**2 Connection**: how AI calls are made. Four modes, Gateway first:
+**API** (the key button at the top of the rail): how AI calls are made. Its
+colour says where the keys stand: amber while one is missing, teal once
+verified, red if a key is rejected. While a key is missing the panel opens on
+this page. Four modes, Gateway first:
 
 | Mode | What it needs | When to use it |
 |---|---|---|
@@ -111,15 +109,20 @@ here rather than three minutes into a run.
 Transcription is always ElevenLabs. The LLM only reads the transcripts to
 match lines; it never hears the audio.
 
-**3 Script**: optional. Paste the dub script and the matcher uses it as a
-pivot; a blank line marks a topic change it relies on.
+**1 Session**: the two track names, the dub language, and where unplaced
+clips are parked. Under them, the optional **Script** row: **Paste** opens the
+script editor in a popup (paste from the clipboard or load a .txt), and
+**Done** saves it. The matcher uses the script as a pivot; a blank line marks
+a topic change it relies on. Below that, a lane view draws every item REAPER
+currently sees on those tracks, refreshed twice a second, so a wrong track
+name shows up here rather than three minutes into a run.
 
-**4 Run**: Collect, Match and Place as three boxes with their own bars, the
+**2 Run**: Collect, Match and Place as three boxes with their own bars, the
 overall progress and time left, and the lane view lit up as far as
 transcription has got. If the worker goes quiet for more than a minute the
 page says so, and after four minutes it flags a probable stall.
 
-**5 Results**: four counts, then a filterable per-clip table showing where
+**3 Results**: four counts, then a filterable per-clip table showing where
 each clip was, where it is now and how far it moved. Click a row to select
 that item in REAPER and put the edit cursor on it.
 
@@ -134,7 +137,7 @@ file holds your keys and is gitignored — keep it that way.
 
 ## Fixing what the matcher missed
 
-Unmatched clips sit on the track named in **01 Session** (**Un sync** by
+Unmatched clips sit on the track named in **1 Session** (**Un sync** by
 default). To place one by hand: select the VO item you want to align to,
 hover the dub item, and run `Sync_Item.lua`
 (load it as an action the same way). It snaps the hovered item to the selected
@@ -169,6 +172,5 @@ The **Run** pane is the whole story — it tails the Python worker live and
 colours errors. `sync_python_log.txt` holds the same output on disk, and
 **Results** keeps the error output of a failed run.
 
-Most failures are one of three things: a wrong key or URL (check **02
-Connection**), a stale venv (re-run `setup.bat`), or direct mode missing its
+Most failures are one of three things: a wrong key or URL (check **API**), a stale venv (re-run `setup.bat`), or direct mode missing its
 extra packages (`setup.bat --direct`).
