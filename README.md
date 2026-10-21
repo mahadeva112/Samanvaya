@@ -145,6 +145,33 @@ item's sync point, honouring snap offsets.
 
 ---
 
+## Measuring sync against ground truth
+
+`tools/sync_truth.py` scores a run against positions you fixed by hand, so a
+change to the matcher can be judged in milliseconds rather than by eye.
+
+1. Run a sync. In REAPER, fix every clip that landed wrong, move any Un sync
+   clip that has a place back onto the dub track, and save the project.
+2. Capture it as a benchmark, before the next sync overwrites the run files:
+
+   ```bash
+   python tools/sync_truth.py capture "D:/Projects/Episode 2.RPP" --name ep2
+   ```
+
+3. Score it. `--replay` adds a column for placement re-run with the code as
+   it is now, with no API calls:
+
+   ```bash
+   python tools/sync_truth.py score ep2 --replay
+   ```
+
+The table shows median and p90 error, the share of clips within 40, 100 and
+250 ms, the bias (negative means clips land early), and clips wrongly dropped
+to or placed from Un sync. Benchmarks live in `benchmarks/`, which is
+gitignored.
+
+---
+
 ## Layout
 
 ```

@@ -123,18 +123,23 @@ def main():
             in_sections.update(sec.get("dub") or [])
         unmatched_dub = sorted(dub_ids - in_sections)
 
-    # Restore speech onsets when a live run recorded them.
-    onsets = (diag or {}).get("speech_start") or {}
-    n_onsets = 0
-    for side, items in (("en", en_items), ("dub", dub_items)):
-        table = onsets.get(side) or {}
-        for item in items:
-            val = table.get(str(item["id"]))
-            if val is not None:
-                item["speech_start"] = val
-                n_onsets += 1
-    print(f"  Speech onsets restored: {n_onsets} "
+    # Restore speech onsets and ends when a live run recorded them. Runs from
+    # before speech ends were recorded have none, and the placer then
+    # measures those clips to their item end, as it did then.
+    restored = {}
+    for field in ("speech_start", "speech_end"):
+        table_by_side = (diag or {}).get(field) or {}
+        restored[field] = 0
+        for side, items in (("en", en_items), ("dub", dub_items)):
+            table = table_by_side.get(side) or {}
+            for item in items:
+                val = table.get(str(item["id"]))
+                if val is not None:
+                    item[field] = val
+                    restored[field] += 1
+    print(f"  Speech onsets restored: {restored['speech_start']} "
           f"(0 means onsets default to clip start for both placers)")
+    print(f"  Speech ends restored:   {restored['speech_end']}")
 
     en_total = max(i["position"] + i["duration"] for i in en_items)
     sm._LAST_DIAG.clear()
@@ -169,6 +174,10 @@ def main():
     diag_out["speech_start"] = {
         "en":  {str(i["id"]): i.get("speech_start") or 0.0 for i in en_items},
         "dub": {str(i["id"]): i.get("speech_start") or 0.0 for i in dub_items},
+    }
+    diag_out["speech_end"] = {
+        "en":  {str(i["id"]): i.get("speech_end") or 0.0 for i in en_items},
+        "dub": {str(i["id"]): i.get("speech_end") or 0.0 for i in dub_items},
     }
     sidecar = out_path.with_name(out_path.stem + "_targets.json")
     with open(sidecar, "w", encoding="utf-8") as f:
