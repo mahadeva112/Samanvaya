@@ -744,14 +744,17 @@ def transcribe_elevenlabs(audio_path, language, api_key):
                 return empty
 
     text = result.get("text", "")
-    words = result.get("words", [])
+    words = _clean_words(result.get("words", []))
 
-    # Extract speech_start and speech_end from word-level timestamps
+    # Speech onset and end from the first and last real word. The raw list
+    # interleaves `spacing` (and, if ever enabled, `audio_event`) entries with
+    # the words, and one of those at either end would move the anchor onto
+    # silence or a breath.
     speech_start = 0.0
     speech_end   = 0.0
     if words:
-        speech_start = words[0].get("start", 0.0)
-        speech_end   = words[-1].get("end", 0.0)
+        speech_start = words[0]["start"]
+        speech_end   = words[-1]["end"]
 
     print(f"    [11LABS] \"{text[:70]}\"")
     if words:
@@ -765,7 +768,7 @@ def transcribe_elevenlabs(audio_path, language, api_key):
         # Word timings drive sub-splitting of over-long EN clips. Kept only
         # when the caller asks for them (see transcribe(keep_words=...)) so
         # the cache doesn't balloon with per-word data nobody reads.
-        "words": _clean_words(words),
+        "words": words,
     }
 
 
@@ -1911,6 +1914,30 @@ def _onset_abs(item):
     return item["position"] + ss
 
 
+def _speech_span(item):
+    """(onset, end) of the speech inside an item, relative to its start.
+
+    Falls back to the item's own end when ASR gave no usable speech end
+    (Gemini audio, an old cache entry, or nonsense): such a clip runs from
+    its onset to its item end, the end it was measured to before speech
+    ends were tracked.
+    """
+    dur = item.get("duration", 0.0) or 0.0
+    ss  = item.get("speech_start") or 0.0
+    if ss < 0.0 or ss > dur:
+        ss = 0.0
+    se  = item.get("speech_end") or 0.0
+    if not (ss < se <= dur + 0.05):
+        se = dur
+    return ss, min(se, dur)
+
+
+def _speech_len(item):
+    """Seconds of speech in an item, never less than a hair above zero."""
+    ss, se = _speech_span(item)
+    return max(0.05, se - ss)
+
+
 def _time_at_progress(spans, u):
     """Absolute time after consuming `u` seconds of speech across `spans`."""
     if u <= 0.0:
@@ -1944,11 +1971,16 @@ def _compute_targets(en_items, dub_items, sections):
             continue
 
         # Otherwise spread the section's DUB speech proportionally over its
-        # EN speech, skipping the silence between EN clips.
-        spans = [(_onset_abs(en_by_id[i]),
-                  en_by_id[i]["position"] + en_by_id[i]["duration"])
-                 for i in en_ids]
-        spans = [(a, b) for a, b in spans if b > a]
+        # EN speech. Both sides count spoken time only, from first word to
+        # last: the silence between EN clips is skipped, and so is a dub
+        # clip's leading and trailing silence, which used to stretch the
+        # share of a clip that happened to be cut loose.
+        spans = []
+        for i in en_ids:
+            e = en_by_id[i]
+            ss, se = _speech_span(e)
+            if se > ss:
+                spans.append((e["position"] + ss, e["position"] + se))
         if not spans:
             first = _onset_abs(en_by_id[en_ids[0]])
             for did in dub_ids:
@@ -1956,12 +1988,12 @@ def _compute_targets(en_items, dub_items, sections):
             continue
 
         len_en  = sum(b - a for a, b in spans)
-        len_dub = sum(dub_by_id[d]["duration"] for d in dub_ids) or 1.0
+        len_dub = sum(_speech_len(dub_by_id[d]) for d in dub_ids) or 1.0
         scale   = len_en / len_dub
         consumed = 0.0
         for did in dub_ids:
             targets[did] = _time_at_progress(spans, consumed * scale)
-            consumed += dub_by_id[did]["duration"]
+            consumed += _speech_len(dub_by_id[did])
 
     return targets
 
@@ -3004,6 +3036,7 @@ def _split_long_en_items(en_items, cache, asr_provider, elevenlabs_key,
                 "transcript":   normalize_text(" ".join(w["text"]
                                                         for w in words[a:b])),
                 "speech_start": max(0.0, words[a]["start"] - rel_start),
+                "speech_end":   max(0.0, words[b - 1]["end"] - rel_start),
                 "virtual_from": item["id"],
             })
             next_id += 1
@@ -3118,6 +3151,7 @@ def match_gemini(en_items, dub_items, dub_language, gemini_key, cache=None,
             item = en_by_id[iid]
             item["transcript"]   = normalize_text(result["text"])
             item["speech_start"] = result["speech_start"]
+            item["speech_end"]   = result.get("speech_end") or 0.0
             print(f'  [{iid:3d}] "{item["transcript"][:70]}"')
 
     print(f"  ✓ Done in {time.time() - _t1:.1f}s")
@@ -3142,6 +3176,7 @@ def match_gemini(en_items, dub_items, dub_language, gemini_key, cache=None,
             item = dub_by_id[iid]
             item["transcript"]   = normalize_text(result["text"])
             item["speech_start"] = result["speech_start"]
+            item["speech_end"]   = result.get("speech_end") or 0.0
             print(f'  [{iid:3d}] "{item["transcript"][:70]}"')
 
     print(f"  ✓ Done in {time.time() - _t2:.1f}s")
@@ -3645,6 +3680,7 @@ def match_items(en_items, dub_items, dub_language, cache, mode="duration",
                                 elevenlabs_key=elevenlabs_key)
             item["transcript"]   = result["text"]
             item["speech_start"] = result["speech_start"]
+            item["speech_end"]   = result.get("speech_end") or 0.0
             print(f'\n        → "{result["text"][:70]}"')
         else:
             item["transcript"]   = ""
@@ -4052,6 +4088,12 @@ def main():
             "en":  {str(i["id"]): round(i.get("speech_start") or 0.0, 6)
                     for i in en_items},
             "dub": {str(i["id"]): round(i.get("speech_start") or 0.0, 6)
+                    for i in dub_items},
+        }
+        diag["speech_end"] = {
+            "en":  {str(i["id"]): round(i.get("speech_end") or 0.0, 6)
+                    for i in en_items},
+            "dub": {str(i["id"]): round(i.get("speech_end") or 0.0, 6)
                     for i in dub_items},
         }
         diag_path = str(Path(output_path).with_name("sync_targets.json"))

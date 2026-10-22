@@ -42,6 +42,9 @@ sync_cache.json
 sync_config.json
 sync_results.json
 sync_targets.json
+# Ground-truth benchmarks (tools/sync_truth.py): copies of the run files above
+# plus hand-fixed positions from a real project.
+benchmarks/
 sync_python_log.txt
 sync_python_pid.txt
 sync_python_done.txt
