@@ -2916,10 +2916,371 @@ local PANE_HEAD = {
                  'What was placed, what was not, and where to find it.' },
 }
 
+-- ═══════════════════════════════════════════════════════════
+-- UPDATES — ask GitHub for the latest release, offer the installer
+-- ═══════════════════════════════════════════════════════════
+-- Releases are tagged vX.Y.Z on the public repo and carry the Windows
+-- installer as an asset, so "is there a newer one" is one unauthenticated GET
+-- against the releases API. Nothing about the user goes with it.
+--
+-- Same shape as the key probe: the fetch is fire-and-forget and the frame
+-- loop polls for its file. It goes through the bundled pythonw.exe when there
+-- is one, because curl.exe is a console program and a 25 MB download would
+-- hold a black window open for its whole length; curl is the fallback.
+--
+-- What the last check found is kept in REAPER's ExtState, so the chip and the
+-- banner are there the moment the panel opens, without waiting on a network
+-- call that only runs once a day.
+local UPD = {
+  REPO     = 'mahadeva112/Samanvaya',
+  SECTION  = 'Samanvaya',
+  EVERY    = 24 * 3600,  -- seconds between automatic checks
+  TIMEOUT  = 30,         -- seconds before a check is declared unanswered
+  STALL    = 45,         -- seconds a download may sit without growing
+  check    = { state = 'idle' },   -- idle | running | ok | latest | error
+  dl       = { state = 'idle' },   -- idle | running | ready | launched | error
+  dlg      = false,      -- the update dialog is up
+  later    = false,      -- "Later" on the banner: hidden for this session
+  booted   = false,
+}
+
+function UPD.get(k, def)
+  local v = reaper.GetExtState(UPD.SECTION, k)
+  if v == nil or v == '' then return def end
+  return v
+end
+
+function UPD.set(k, v) reaper.SetExtState(UPD.SECTION, k, tostring(v or ''), true) end
+
+-- '1.0.3' or 'v1.0.3' as { 1, 0, 3 }; nil for anything else.
+function UPD.parse_ver(s)
+  local a, b, c = tostring(s or ''):match('^%s*[vV]?(%d+)%.(%d+)%.?(%d*)')
+  if not a then return nil end
+  return { tonumber(a), tonumber(b), tonumber(c) or 0 }
+end
+
+function UPD.newer(a, b)
+  local x, y = UPD.parse_ver(a), UPD.parse_ver(b)
+  if not x or not y then return false end
+  for i = 1, 3 do
+    if x[i] ~= y[i] then return x[i] > y[i] end
+  end
+  return false
+end
+
+-- A JSON string body, unescaped. \uXXXX is turned into UTF-8 so the notes
+-- read as written; the panel's own font decides what it can draw.
+function UPD.unjson(s)
+  s = s:gsub('\\u(%x%x%x%x)', function(h)
+    local n = tonumber(h, 16)
+    if n < 0x80 then return string.char(n) end
+    if n < 0x800 then
+      return string.char(0xC0 | (n >> 6), 0x80 | (n & 0x3F))
+    end
+    return string.char(0xE0 | (n >> 12), 0x80 | ((n >> 6) & 0x3F), 0x80 | (n & 0x3F))
+  end)
+  local map = { n = '\n', r = '', t = ' ', ['"'] = '"', ['\\'] = '\\', ['/'] = '/' }
+  return (s:gsub('\\(.)', function(c) return map[c] or c end))
+end
+
+-- One string field of the release object. Pattern-based for the same reason
+-- the model lists are: Lua ships no JSON reader, and these fields are flat.
+function UPD.jfield(body, key)
+  local raw = body:match('"' .. key .. '"%s*:%s*"(.-[^\\])"')
+           or body:match('"' .. key .. '"%s*:%s*"()"') and ''
+  return raw and UPD.unjson(raw) or nil
+end
+
+-- The release notes are Markdown written for the GitHub page. The dialog
+-- wants the bullet points only, without the emphasis marks, and in glyphs
+-- the default face can draw.
+function UPD.notes(md)
+  local out = {}
+  for line in (md or ''):gmatch('[^\n]+') do
+    local b = line:match('^%s*[-*]%s+(.+)$')
+    if b then
+      b = b:gsub('%*%*', ''):gsub('`', ''):gsub('%[([^%]]+)%]%([^)]+%)', '%1')
+           :gsub('\226\134\146', '->'):gsub('\226\128[\147\148]', '-')
+           :gsub('[\226-\244][\128-\191]*', '')
+      out[#out + 1] = b
+      if #out == 6 then break end
+    end
+  end
+  return out
+end
+
+-- The release, out of the API's answer: tag, date, installer URL and size.
+-- The asset's "size" precedes its "browser_download_url" in the object, so
+-- the size is the last one seen before the installer's URL.
+function UPD.read_release(body)
+  local tag = UPD.jfield(body, 'tag_name')
+  if not tag or not UPD.parse_ver(tag) then return nil end
+  local rel = { tag = tag:gsub('^[vV]', ''),
+                date = (UPD.jfield(body, 'published_at') or ''):sub(1, 10),
+                notes = UPD.notes(UPD.jfield(body, 'body')),
+                page = 'https://github.com/' .. UPD.REPO .. '/releases/tag/' .. tag,
+                url = '', size = 0 }
+  local at, url = body:match('()"browser_download_url"%s*:%s*"([^"]-Setup[^"]-%.exe)"')
+  if url then
+    rel.url = url
+    for n in body:sub(1, at):gmatch('"size"%s*:%s*(%d+)') do rel.size = tonumber(n) end
+  end
+  return rel
+end
+
+function UPD.save(rel)
+  UPD.set('upd_tag', rel.tag);   UPD.set('upd_date', rel.date)
+  UPD.set('upd_url', rel.url);   UPD.set('upd_size', rel.size)
+  UPD.set('upd_page', rel.page); UPD.set('upd_notes', table.concat(rel.notes, '||'))
+end
+
+function UPD.load()
+  local tag = UPD.get('upd_tag', '')
+  if tag == '' then return nil end
+  local notes = {}
+  for n in (UPD.get('upd_notes', '') .. '||'):gmatch('(.-)||') do
+    if n ~= '' then notes[#notes + 1] = n end
+  end
+  return { tag = tag, date = UPD.get('upd_date', ''), url = UPD.get('upd_url', ''),
+           size = tonumber(UPD.get('upd_size', '0')) or 0,
+           page = UPD.get('upd_page', ''), notes = notes }
+end
+
+-- The newest release this panel knows of, when it is newer than this copy.
+function UPD.available()
+  local rel = UPD.rel
+  if rel and _APP_VERSION ~= '' and UPD.newer(rel.tag, _APP_VERSION) then return rel end
+  return nil
+end
+
+-- Available, not skipped, not put off: the chip and the banner show.
+function UPD.nagging()
+  local rel = UPD.available()
+  return rel and UPD.get('upd_skip', '') ~= rel.tag and rel or nil
+end
+
+function UPD.auto_on() return UPD.get('upd_auto', '1') == '1' end
+
+function UPD.temp(name)
+  local dir = os.getenv('TEMP') or os.getenv('TMP') or '/tmp'
+  return dir .. package.config:sub(1, 1) .. name
+end
+
+-- The fetcher the bundled interpreter runs. Writes to <dest>.part and renames
+-- on success, so "the file exists" means "the file is whole"; a failure
+-- leaves <dest>.err with the reason instead.
+UPD.FETCH_PY = [[
+import os, sys, urllib.request as u
+src, dest = sys.argv[1], sys.argv[2]
+try:
+    req = u.Request(src, headers={'User-Agent': 'Samanvaya',
+                                  'Accept': 'application/vnd.github+json'})
+    with u.urlopen(req, timeout=30) as r, open(dest + '.part', 'wb') as f:
+        while True:
+            b = r.read(65536)
+            if not b:
+                break
+            f.write(b)
+            f.flush()
+    os.replace(dest + '.part', dest)
+except Exception as e:
+    with open(dest + '.err', 'w') as f:
+        f.write(str(e))
+]]
+
+-- Start one fetch of `url` into `dest`. Returns false when nothing could be
+-- launched. job.py says which way it went: the pythonw path renames when it
+-- is done, the curl path has to be judged by the file settling.
+function UPD.fetch(job, url, dest)
+  os.remove(dest); os.remove(dest .. '.part'); os.remove(dest .. '.err')
+  job.dest, job.started, job.size, job.grew = dest, reaper.time_precise(), -1, reaper.time_precise()
+
+  local sep = package.config:sub(1, 1)
+  local pyw = get_script_dir() .. sep .. 'python' .. sep .. 'pythonw.exe'
+  local cmd
+  if _is_windows() and file_exists(pyw) then
+    local helper = UPD.temp('samanvaya_fetch.py')
+    local fh = io.open(helper, 'w')
+    if fh then
+      fh:write(UPD.FETCH_PY); fh:close()
+      job.py = true
+      cmd = string.format('"%s" "%s" "%s" "%s"', pyw, helper, url, dest)
+    end
+  end
+  if not cmd then
+    job.py = false
+    local curl = _is_windows() and 'curl.exe' or '/usr/bin/curl'
+    cmd = string.format('"%s" -sS -L -f -H "User-Agent: Samanvaya" -o "%s" "%s"',
+                        curl, dest .. '.part', url)
+  end
+
+  if _is_windows() then
+    if not reaper.ExecProcess or reaper.ExecProcess(cmd, -2) == nil then return false end
+  else
+    os.execute(cmd .. ' >/dev/null 2>&1 &')
+  end
+  return true
+end
+
+-- Bytes on disk, or -1. Seeks rather than reads: the installer is 25 MB and
+-- this runs four times a second.
+function UPD.fsize(path)
+  local f = io.open(path, 'rb')
+  if not f then return -1 end
+  local n = f:seek('end') or -1
+  f:close()
+  return n
+end
+
+-- What the fetcher's exception means, in words for the panel.
+function UPD.why(err)
+  err = err or ''
+  if err:find('403') or err:find('429') then
+    return 'GitHub is limiting checks right now. Try again in an hour.'
+  elseif err:find('404') then
+    return 'No release is published yet.'
+  elseif err:find('urlopen error') or err:find('getaddrinfo') or err:find('timed out') then
+    return "Couldn't reach GitHub. Check the connection."
+  end
+  return (err:gsub('%s+$', ''):sub(1, 120))
+end
+
+-- Where a fetch stands: 'running', 'done' or 'error' (plus the reason).
+-- `want` is the exact size when it is known, which is how the curl path
+-- tells a finished download from one that has merely paused.
+function UPD.poll(job, timeout, want)
+  local dest, now = job.dest, reaper.time_precise()
+  if now < (job.next or 0) then return 'running' end
+  job.next = now + 0.25
+  if file_exists(dest) then return 'done' end
+  local err = read_file(dest .. '.err')
+  if err then os.remove(dest .. '.err'); return 'error', UPD.why(err) end
+
+  local n = UPD.fsize(dest .. '.part')
+  if n ~= job.size then job.size, job.grew = n, now end
+  job.got = math.max(n, 0)
+
+  if not job.py and n > 0 then
+    -- curl writes straight into .part; it is done when it stops growing and,
+    -- for the installer, when every byte the release listed is there.
+    if (want and want > 0 and n == want) or (not want and now - job.grew > 1.5) then
+      os.rename(dest .. '.part', dest)
+      return 'done'
+    end
+  end
+
+  if n <= 0 and now - job.started > timeout then
+    return 'error', 'No answer from GitHub.'
+  end
+  if n > 0 and now - job.grew > UPD.STALL then
+    return 'error', 'The download stopped partway.'
+  end
+  return 'running'
+end
+
+-- Ask GitHub now. `manual` is the button: it reports "you're up to date"
+-- where the daily check would stay quiet.
+function UPD.check_now(manual)
+  if UPD.check.state == 'running' then return end
+  local job = { state = 'running', manual = manual }
+  UPD.check = job
+  local url = 'https://api.github.com/repos/' .. UPD.REPO .. '/releases/latest'
+  if not UPD.fetch(job, url, UPD.temp('samanvaya_release.json')) then
+    UPD.check = { state = 'error', msg = 'Could not start the check.', manual = manual }
+  end
+end
+
+function UPD.download()
+  local rel = UPD.available()
+  if not rel or rel.url == '' then return end
+  local job = { state = 'running', tag = rel.tag, want = rel.size }
+  UPD.dl = job
+  local name = rel.url:match('([^/]+)$') or ('Samanvaya_Setup_' .. rel.tag .. '.exe')
+  if not UPD.fetch(job, rel.url, UPD.temp(name)) then
+    UPD.dl = { state = 'error', msg = 'Could not start the download.' }
+  end
+end
+
+-- Setup checks for a running REAPER itself and asks for it to be closed, so
+-- it can be launched from here; installing waits on that.
+function UPD.run_setup()
+  local path = UPD.dl.dest
+  if not path or not file_exists(path) then
+    UPD.dl = { state = 'error', msg = 'The downloaded installer is gone. Download it again.' }
+    return
+  end
+  if reaper.ExecProcess and reaper.ExecProcess('"' .. path .. '"', -2) ~= nil then
+    UPD.dl.state = 'launched'
+  else
+    UPD.dl = { state = 'error', msg = 'Could not start Setup. Run it from ' .. path }
+  end
+end
+
+function UPD.open_page(url)
+  if not url or url == '' then return end
+  if reaper.CF_ShellExecute then
+    reaper.CF_ShellExecute(url)
+  elseif _is_windows() then
+    os.execute('start "" "' .. url .. '"')
+  else
+    os.execute('open "' .. url .. '"')
+  end
+end
+
+-- Called every frame from refresh_state. Cheap while nothing is in flight.
+function UPD.tick()
+  if not UPD.booted then
+    UPD.booted = true
+    UPD.rel = UPD.load()
+    local last = tonumber(UPD.get('upd_checked', '0')) or 0
+    if UPD.auto_on() and os.time() - last >= UPD.EVERY then UPD.check_now(false) end
+  end
+
+  local c = UPD.check
+  if c.state == 'running' then
+    local st, msg = UPD.poll(c, UPD.TIMEOUT)
+    if st == 'done' then
+      local rel = UPD.read_release(read_file(c.dest) or '')
+      os.remove(c.dest)
+      if rel then
+        UPD.rel = rel
+        UPD.save(rel)
+        UPD.set('upd_checked', os.time())
+        UPD.check = { state = UPD.available() and 'ok' or 'latest', manual = c.manual }
+      else
+        UPD.check = { state = 'error', msg = 'GitHub answered, but listed no release.',
+                      manual = c.manual }
+      end
+    elseif st == 'error' then
+      UPD.check = { state = 'error', msg = msg, manual = c.manual }
+    end
+  end
+
+  local d = UPD.dl
+  if d.state == 'running' then
+    local st, msg = UPD.poll(d, UPD.TIMEOUT, d.want)
+    if st == 'done' then d.state = 'ready'
+    elseif st == 'error' then UPD.dl = { state = 'error', msg = msg } end
+  end
+end
+
+function UPD.mb(n) return string.format('%d MB', math.floor((n or 0) / 1048576 + 0.5)) end
+
+function UPD.ago(t)
+  t = tonumber(t) or 0
+  if t <= 0 then return 'never' end
+  local s = os.time() - t
+  if s < 90 then return 'just now' end
+  if s < 3600 then return math.floor(s / 60) .. ' min ago' end
+  if s < 86400 then return math.floor(s / 3600) .. ' h ago' end
+  return os.date('%d %b', t)
+end
+
 -- Recompute everything the rail, the panes and the action bar share.
 local function refresh_state()
   -- The credential check runs off the frame loop: debounce, launch, poll.
   probe_tick()
+  UPD.tick()
 
   local function fexists(p)
     local h = io.open(p, 'r'); if h then h:close(); return true end; return false
@@ -3100,6 +3461,42 @@ local function ui_rail(ctx, on_start)
     SUI.fitline(ctx, SUI.col.faint, {
       'DUB ALIGNMENT' .. ver, 'DUB ALIGNMENT',
     }, 10, INNER_W)
+
+    -- Update chip: a newer release is out. Amber outline, because it is
+    -- something to act on, but not a fill — Start sync keeps the only one.
+    -- A download in flight keeps it up even for a skipped version.
+    local urel = UPD.nagging() or (UPD.dl.state ~= 'idle' and UPD.available())
+    if urel then
+      local label = urel.tag .. ' available'
+      if UPD.dl.state == 'running' and (UPD.dl.want or 0) > 0 then
+        label = string.format('Downloading %d%%',
+          math.floor(100 * (UPD.dl.got or 0) / UPD.dl.want))
+      elseif UPD.dl.state == 'ready' or UPD.dl.state == 'launched' then
+        label = 'Update ready'
+      end
+      SUI.gap(ctx, 4)
+      local pushed = _ui_font and pcall(reaper.ImGui_PushFont, ctx, _ui_font, 11)
+      local okw, tw = pcall(reaper.ImGui_CalcTextSize, ctx, label)
+      tw = (okw and type(tw) == 'number') and tw or 90
+      local CW, CH = tw + 28, 20
+      local okp, x0, y0 = pcall(reaper.ImGui_GetCursorScreenPos, ctx)
+      if reaper.ImGui_InvisibleButton(ctx, '##updchip', CW, CH) then UPD.dlg = true end
+      local okh, hov = pcall(reaper.ImGui_IsItemHovered, ctx)
+      if okh and hov and reaper.ImGui_SetTooltip then
+        pcall(reaper.ImGui_SetTooltip, ctx, 'Samanvaya ' .. urel.tag .. ': see what is new')
+      end
+      if okp and type(x0) == 'number' then
+        if okh and hov then
+          pcall(reaper.ImGui_DrawList_AddRectFilled, dl, x0, y0, x0 + CW, y0 + CH,
+            (SUI.col.dub & 0xFFFFFF00) | 0x1F, CH * 0.5)
+        end
+        pcall(reaper.ImGui_DrawList_AddRect, dl, x0, y0, x0 + CW, y0 + CH,
+          SUI.col.dub, CH * 0.5, 0, 1.0)
+        pcall(reaper.ImGui_DrawList_AddCircleFilled, dl, x0 + 11, y0 + CH * 0.5, 3, SUI.col.dub)
+        pcall(reaper.ImGui_DrawList_AddText, dl, x0 + 19, y0 + 3, SUI.col.dub, label)
+      end
+      if pushed then pcall(reaper.ImGui_PopFont, ctx) end
+    end
     SUI.gap(ctx, 10)
 
     -- API: the keys are set once, not every run, so they sit above the
@@ -3638,6 +4035,59 @@ local function ui_detection_card(ctx)
 end
 
 
+-- ─── Updates card, at the foot of the API page ────────────
+-- The manual way in: what is installed, when GitHub was last asked, and a
+-- button to ask again. It lives with the keys because both are set-once
+-- housekeeping, not part of a sync.
+function UPD.card(ctx)
+  SUI.eyebrow(ctx, 'Updates')
+  SUI.gap(ctx, 2)
+  local open = SUI.card_begin(ctx, '##c_upd', 132)
+  if open then
+    local function row(k, v, col)
+      SUI.text(ctx, SUI.col.dim, k)
+      reaper.ImGui_SameLine(ctx, 108)
+      SUI.text(ctx, col or SUI.col.text, v)
+    end
+    row('Installed', _APP_VERSION ~= '' and ('v' .. _APP_VERSION) or 'unknown')
+    row('Last checked', UPD.ago(UPD.get('upd_checked', '0')))
+    SUI.gap(ctx, 4)
+
+    local c, rel = UPD.check, UPD.available()
+    local busy = (c.state == 'running')
+    _ui_begin_disabled(ctx, busy)
+    if SUI.cta(ctx, (busy and 'Checking...' or 'Check for updates') .. '##updchk',
+               150, 28, 'raised', busy) then
+      UPD.check_now(true)
+    end
+    _ui_end_disabled(ctx)
+
+    -- The result, beside the button: what the last check said, or, with
+    -- nothing asked yet this session, what the cached answer says.
+    reaper.ImGui_SameLine(ctx, 0, 10)
+    if busy then
+      SUI.ftext(ctx, SUI.col.faint, 'Asking GitHub...')
+    elseif c.state == 'error' then
+      SUI.ftext(ctx, SUI.col.err, c.msg or "Couldn't reach GitHub.")
+    elseif rel then
+      if SUI.cta(ctx, rel.tag .. ' available##updview', 128, 28) then UPD.dlg = true end
+    elseif c.state == 'latest' or UPD.rel then
+      SUI.ftext(ctx, SUI.col.ok, "You're on the latest version")
+    else
+      reaper.ImGui_NewLine(ctx)
+    end
+
+    SUI.gap(ctx, 2)
+    local auto = UPD.auto_on()
+    local rv, nv = reaper.ImGui_Checkbox(ctx, 'Check automatically once a day', auto)
+    if rv then UPD.set('upd_auto', nv and '1' or '0') end
+  end
+  SUI.card_end(ctx, open)
+  SUI.gap(ctx, 4)
+  SUI.wrap(ctx, SUI.col.faint, 'Reads the public release list at github.com/'
+    .. UPD.REPO .. '. Nothing about you or your project is sent.')
+end
+
 local function ui_pane_connection(ctx)
   local pw = (_ui_show_keys and 0)
     or (reaper.ImGui_InputTextFlags_Password and reaper.ImGui_InputTextFlags_Password() or 0)
@@ -3721,6 +4171,9 @@ local function ui_pane_connection(ctx)
       'ElevenLabs turns the audio into text. The LLM only reads that text to '
       .. 'match lines — it never hears the audio.')
   end
+
+  SUI.gap(ctx, 10)
+  UPD.card(ctx)
 end
 
 
@@ -4367,6 +4820,37 @@ local function ui_pane_results(ctx)
 end
 
 
+-- ─── Update banner ────────────────────────────────────────
+-- Above whichever page is open, once per session: Later hides it until the
+-- panel is next opened, Skip this version (in the dialog) until the next
+-- release. Never during a run — that is not the moment to ask.
+function UPD.banner(ctx)
+  local rel = UPD.nagging()
+  if not rel or UPD.later or UPD.dlg or _st.running or UPD.dl.state ~= 'idle' then return end
+
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ChildRounding(), 12.0)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ChildBorderSize(), 1.0)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), 12.0, 10.0)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ChildBg(), 0x2A2418FF)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Border(), (SUI.col.dub & 0xFFFFFF00) | 0x59)
+  local flags, h = _child_border_flag(), 92
+  if reaper.ImGui_ChildFlags_AutoResizeY then
+    flags, h = flags | reaper.ImGui_ChildFlags_AutoResizeY(), 0
+  end
+  if reaper.ImGui_BeginChild(ctx, '##updbanner', -1, h, flags, SUI.NOSB) then
+    SUI.text(ctx, SUI.col.dub, 'Samanvaya ' .. rel.tag .. ' is out')
+    if rel.notes[1] then SUI.wrap(ctx, SUI.col.dim, rel.notes[1]) end
+    SUI.gap(ctx, 2)
+    if SUI.cta(ctx, "What's new##updnew", 104, 28) then UPD.dlg = true end
+    reaper.ImGui_SameLine(ctx, 0, 8)
+    if SUI.cta(ctx, 'Later##updlater', 72, 28, 'ghost') then UPD.later = true end
+    reaper.ImGui_EndChild(ctx)
+  end
+  reaper.ImGui_PopStyleColor(ctx, 2)
+  reaper.ImGui_PopStyleVar(ctx, 3)
+  SUI.gap(ctx, 6)
+end
+
 -- ─── The detail pane: header, then whichever section is selected ──
 local function ui_detail(ctx, h)
   if _ui_nav == 'log' then SUI.log_open = true; _ui_nav = 'run' end
@@ -4382,6 +4866,7 @@ local function ui_detail(ctx, h)
     SUI.text(ctx, SUI.col.dim, head[2])
     SUI.gap(ctx, 7)
     _ui_render_banner(ctx)
+    UPD.banner(ctx)
 
     if _ui_setup_card then
       reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ChildRounding(), 14.0)
@@ -4870,6 +5355,162 @@ local function ui_render_dialog(ctx)
 end
 
 
+-- ─── The update dialog ────────────────────────────────────
+-- Opened from the rail chip, the banner, or the Updates card. One dialog for
+-- the whole trip: what is new, then the download, then handing over to Setup.
+-- Drawn at window scope like the others, for the same clipping reason.
+UPD.DLG_ID = 'Update##upddlg'
+
+function UPD.popup(ctx)
+  if not UPD.dlg then return end
+  local rel = UPD.available()
+  if not rel then UPD.dlg = false; return end
+
+  if not UPD.dlg_shown then
+    reaper.ImGui_OpenPopup(ctx, UPD.DLG_ID)
+    UPD.dlg_shown = true
+  end
+
+  local wx, wy = reaper.ImGui_GetWindowPos(ctx)
+  local ww, wh = reaper.ImGui_GetWindowSize(ctx)
+  reaper.ImGui_SetNextWindowPos(ctx, wx + ww * 0.5, wy + wh * 0.5,
+    reaper.ImGui_Cond_Always(), 0.5, 0.5)
+  reaper.ImGui_SetNextWindowSize(ctx, 440, 0, reaper.ImGui_Cond_Always())
+
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), 20.0, 18.0)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowRounding(), 14.0)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_PopupBg(), SUI.col.rail)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Border(),  SUI.col.line)
+
+  local flags = reaper.ImGui_WindowFlags_NoTitleBar()
+              | reaper.ImGui_WindowFlags_NoResize()
+              | reaper.ImGui_WindowFlags_NoMove()
+              | SUI.NOSB
+
+  local close = false
+  if reaper.ImGui_BeginPopupModal(ctx, UPD.DLG_ID, nil, flags) then
+    local d = UPD.dl
+    SUI.eyebrow(ctx, 'Update')
+    SUI.big(ctx, SUI.col.white, 'Samanvaya ' .. rel.tag, 18)
+    local facts = { 'You have ' .. (_APP_VERSION ~= '' and _APP_VERSION or '?') }
+    if rel.date ~= '' then facts[#facts + 1] = 'released ' .. rel.date end
+    if rel.size > 0 then facts[#facts + 1] = UPD.mb(rel.size) end
+    SUI.text(ctx, SUI.col.faint, table.concat(facts, '  ·  '))
+
+    if #rel.notes > 0 then
+      SUI.gap(ctx, 8)
+      local open = SUI.card_begin(ctx, '##updnotes', #rel.notes * 36 + 24)
+      if open then
+        for _, s in ipairs(rel.notes) do
+          local dx, dy = reaper.ImGui_GetCursorScreenPos(ctx)
+          if type(dx) == 'number' and reaper.ImGui_GetWindowDrawList then
+            pcall(reaper.ImGui_DrawList_AddCircleFilled,
+                  reaper.ImGui_GetWindowDrawList(ctx), dx + 3, dy + 8, 2.5, SUI.col.accent)
+          end
+          reaper.ImGui_Dummy(ctx, 13, 0)
+          reaper.ImGui_SameLine(ctx, 0, 0)
+          SUI.wrap(ctx, SUI.col.text, s)
+        end
+      end
+      SUI.card_end(ctx, open)
+    end
+
+    SUI.gap(ctx, 10)
+    local BH = 32
+    local availw = reaper.ImGui_GetContentRegionAvail(ctx)
+    availw = type(availw) == 'number' and availw or 400
+    -- Buttons sit on the right, the commitment last, as in the other dialogs.
+    local function right(total)
+      local cx = reaper.ImGui_GetCursorPosX(ctx)
+      if type(cx) == 'number' then
+        reaper.ImGui_SetCursorPosX(ctx, cx + math.max(0, availw - total))
+      end
+    end
+
+    if d.state == 'running' then
+      local frac = (d.want or 0) > 0 and math.min(1, (d.got or 0) / d.want) or 0
+      SUI.text(ctx, SUI.col.dim, string.format('Downloading  %s / %s',
+        UPD.mb(d.got), d.want > 0 and UPD.mb(d.want) or '?'))
+      SUI.bar(ctx, frac, -1, 6)
+      SUI.gap(ctx, 6)
+      SUI.wrap(ctx, SUI.col.faint, 'You can close this; the download carries on '
+        .. 'and the chip in the rail shows how far it has got.')
+      SUI.gap(ctx, 8)
+      right(96)
+      if SUI.cta(ctx, 'Hide##updhide', 96, BH, 'ghost') then close = true end
+
+    elseif d.state == 'ready' then
+      SUI.text(ctx, SUI.col.ok, 'Downloaded. Setup is ready to run.')
+      SUI.gap(ctx, 4)
+      SUI.wrap(ctx, SUI.col.faint, 'Save your project first. Setup asks you to '
+        .. 'close REAPER before it installs. Your API keys, settings and shortcut stay.')
+      SUI.gap(ctx, 10)
+      right(96 + 9 + 120)
+      if SUI.cta(ctx, 'Later##updl2', 96, BH, 'ghost') then close = true end
+      reaper.ImGui_SameLine(ctx, 0, 9)
+      if SUI.cta(ctx, 'Run Setup##updrun', 120, BH) then UPD.run_setup() end
+
+    elseif d.state == 'launched' then
+      SUI.text(ctx, SUI.col.ok, 'Setup is open.')
+      SUI.gap(ctx, 4)
+      SUI.wrap(ctx, SUI.col.faint, 'Save your project, then close REAPER when Setup '
+        .. 'asks. Open REAPER again afterwards and press your shortcut.')
+      SUI.gap(ctx, 10)
+      right(96)
+      if SUI.cta(ctx, 'Close##updok', 96, BH, 'ghost') then close = true end
+
+    else
+      if d.state == 'error' then
+        SUI.wrap(ctx, SUI.col.err, d.msg or 'The download failed.')
+        SUI.gap(ctx, 6)
+      end
+      -- The installer is Windows-only; anywhere else, or on a release that
+      -- shipped without one, the release page is the way to it.
+      local can_install = _is_windows() and rel.url ~= ''
+      if can_install then
+        SUI.wrap(ctx, SUI.col.faint,
+          'Setup asks you to close REAPER before it installs. Your keys and settings stay.')
+        SUI.gap(ctx, 10)
+      end
+
+      -- Skip sits apart on the left: it is the one answer that lasts past
+      -- this session, so it should not be mistaken for Later.
+      local okx, lx = pcall(reaper.ImGui_GetCursorPosX, ctx)
+      if SUI.cta(ctx, 'Skip this version##updskip', 140, BH, 'ghost') then
+        UPD.set('upd_skip', rel.tag)
+        close = true
+      end
+      reaper.ImGui_SameLine(ctx, 0, 0)
+      local mainw = can_install and 172 or 150
+      if okx and type(lx) == 'number' then
+        reaper.ImGui_SetCursorPosX(ctx, lx + math.max(148, availw - (80 + 9 + mainw)))
+      end
+      if SUI.cta(ctx, 'Later##updlater2', 80, BH, 'ghost') then
+        UPD.later = true
+        close = true
+      end
+      reaper.ImGui_SameLine(ctx, 0, 9)
+      if can_install then
+        local lab = d.state == 'error' and 'Try again' or 'Download and install'
+        if SUI.cta(ctx, lab .. '##upddl', mainw, BH) then UPD.download() end
+      elseif SUI.cta(ctx, 'Open release page##updpage', mainw, BH) then
+        UPD.open_page(rel.page)
+        close = true
+      end
+    end
+
+    if close then reaper.ImGui_CloseCurrentPopup(ctx) end
+    reaper.ImGui_EndPopup(ctx)
+  else
+    close = true   -- Escape, or a click outside it
+  end
+
+  reaper.ImGui_PopStyleColor(ctx, 2)
+  reaper.ImGui_PopStyleVar(ctx, 2)
+  if close then UPD.dlg, UPD.dlg_shown = false, false end
+end
+
+
 -- One frame of the whole app: rail, detail pane, action bar. `_ui_phase`
 -- says what the engine is doing; `_ui_nav` says what you are looking at, and
 -- sync_nav_to_phase() is the single place the first pulls the second along.
@@ -4906,6 +5547,7 @@ local function render_active_phase(ctx, on_close)
   ui_render_dialog(ctx)
   ui_script_popup(ctx)
   ui_log_popup(ctx)
+  UPD.popup(ctx)
 end
 
 
