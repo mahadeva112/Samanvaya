@@ -806,9 +806,26 @@ local function _ui_render_banner(ctx)
   reaper.ImGui_Dummy(ctx, 0, 6)
 end
 
-local function _spinner_glyph()
-  local frames = { '|','/','-','\\' }
-  return frames[math.floor(os.clock() * 8) % #frames + 1]
+-- Busy ring: a faint track with a quarter arc sweeping round it, drawn in
+-- strokes inside a fixed square. The old |/-\ glyphs each had their own
+-- width, so everything after them on the line jittered sideways.
+local function _spinner_ring(ctx, size, col)
+  local okp, sx, sy = pcall(reaper.ImGui_GetCursorScreenPos, ctx)
+  reaper.ImGui_Dummy(ctx, size, size)
+  if not okp or type(sx) ~= 'number' or not reaper.ImGui_GetWindowDrawList then return end
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+  local cx, cy = sx + size * 0.5, sy + size * 0.5
+  local r      = size * 0.5 - 1.5
+  pcall(reaper.ImGui_DrawList_AddCircle, dl, cx, cy, r, (col & ~0xFF) | 0x38, 0, 2.0)
+  local a0, SEG = (os.clock() * 7.0) % (2 * math.pi), 10
+  local span    = math.pi * 0.6
+  local px, py  = cx + r * math.cos(a0), cy + r * math.sin(a0)
+  for i = 1, SEG do
+    local a = a0 + span * i / SEG
+    local nx, ny = cx + r * math.cos(a), cy + r * math.sin(a)
+    pcall(reaper.ImGui_DrawList_AddLine, dl, px, py, nx, ny, col, 2.0)
+    px, py = nx, ny
+  end
 end
 
 -- Cancel a running sync by killing the worker PID that run_sync.py published.
@@ -1874,7 +1891,7 @@ SUI.col = {
   -- (what is already right), amber is the dub (what gets moved). Amber is
   -- also the one action that moves it, Start sync. Everything else is ink.
   bg      = 0x0D0F14FF,   -- window
-  rail    = 0x13161DFF,   -- workflow rail, log drawer
+  rail    = 0x13161DFF,   -- workflow rail, popups
   card    = 0x13161DFF,   -- raised surface
   cardhi  = 0x1A1E27FF,   -- control on a card
   line    = 0x323846FF,   -- hairline
@@ -2496,6 +2513,31 @@ function SUI.mmss(s)
   return string.format('%02d:%02d', math.floor(s / 60), s % 60)
 end
 
+-- Errors and warnings in the log, for the level chips and the Log button.
+function SUI.log_counts()
+  local nerr, nwarn = 0, 0
+  for i = 1, #_log_buffer do
+    if     SUI.log_is_err(_log_buffer[i])  then nerr  = nerr  + 1
+    elseif SUI.log_is_warn(_log_buffer[i]) then nwarn = nwarn + 1 end
+  end
+  return nerr, nwarn
+end
+
+-- One line of text cut off at the right edge of the pane rather than
+-- wrapped, for the newest log line under the progress bar.
+function SUI.line_clipped(ctx, col, s)
+  local okp, x, y = pcall(reaper.ImGui_GetCursorScreenPos, ctx)
+  local w  = reaper.ImGui_GetContentRegionAvail(ctx)
+  local lh = reaper.ImGui_GetTextLineHeight(ctx)
+  if okp and type(x) == 'number' and type(w) == 'number' and reaper.ImGui_GetWindowDrawList then
+    local dl = reaper.ImGui_GetWindowDrawList(ctx)
+    pcall(reaper.ImGui_DrawList_PushClipRect, dl, x, y, x + w, y + lh, true)
+    pcall(reaper.ImGui_DrawList_AddText, dl, x, y, col, s)
+    pcall(reaper.ImGui_DrawList_PopClipRect, dl)
+  end
+  reaper.ImGui_Dummy(ctx, 1, lh)
+end
+
 -- Colour a log line by what it is saying. Keeps a 400-line wall readable.
 function SUI.log_colour(line)
   if line:find('ERROR', 1, true) or line:find('Traceback', 1, true)
@@ -2800,11 +2842,10 @@ function SUI.reset_run()
   SUI.tl_dirty()
 end
 
--- The log lives in a drawer under the pane, not on a page of its own: the
--- one line you want during a run is the newest, and it should be readable
--- from whichever page you are on.
-SUI.drawer_open = false
-SUI.DRAWER_SHUT = 42
+-- The log opens as a popup from the Log button on Run, not as a drawer
+-- under every page: a drawer took a strip off each page to show one line
+-- that only mattered during a run, and Run now shows that line itself.
+SUI.log_open = false
 
 -- Gateway first: your own OpenAI-compatible LLM plus an ElevenLabs key is
 -- the usual setup, so it is the mode the panel opens on.
@@ -2850,7 +2891,7 @@ local _ui_dialog = nil
 
 local function ui_ask(spec) _ui_dialog = spec end
 
--- The log is not a stage: it is the drawer under every page. Neither are the
+-- The log is not a stage: it is a popup off the Run page. Neither are the
 -- keys or the script: keys are set once, behind the API button at the top of
 -- the rail, and the optional script is pasted from a row on Session. What is
 -- left is the order a sync actually runs in.
@@ -3020,7 +3061,6 @@ local function sync_nav_to_phase()
   elseif _ui_phase == 'success' or _ui_phase == 'failure' then
     _ui_nav = 'results'
     SUI.tl_dirty()
-    if _ui_phase == 'failure' then SUI.drawer_open = true end
   elseif _ui_phase == 'setup'   then _ui_nav = 'session' end
 end
 
@@ -3693,77 +3733,53 @@ local function _is_speaker_line(ln)
   return ln:sub(-1) == ':' and _utf8_len(ln) <= 40 and not ln:find('[%.%?!]')
 end
 
--- Inner width of the editor, measured after it draws. Used by the reflow on
--- the frame after, which is soon enough — nothing reflows on frame one.
-local _script_px = 0
-
--- What the buffer in the box was last reflowed against. The soft wrap is
--- automatic — there is no Wrap button — so these two are what tells the next
--- frame whether the text on screen still matches the box it sits in: the
--- width changed (the window was resized) or the length changed (something was
--- typed or pasted straight in).
-local _script_wrap_px  = 0
-local _script_wrap_len = -1
-
--- ImGui's InputTextMultiline has no soft wrap: a long line runs off to the
--- right and you scroll to read it. So wrap the buffer itself, the way
--- Notepad's Word Wrap would, measuring real glyph widths rather than
--- counting characters — Devanagari and Latin are nowhere near the same width.
---
--- Safe to do because the matcher joins the lines inside a paragraph back
--- together with spaces before it reads them. Blank lines are the one piece
--- of layout it does read, so those survive verbatim.
-local function _script_rewrap(ctx, s, px)
-  if not s or s == '' or not px or px < 80 then return s end
-
-  -- Measure in the face the editor actually renders with. Called from the
-  -- toolbar, where that font is not on the stack — measuring Devanagari with
-  -- the default Latin UI font would wrap to the wrong width every time.
-  local pushed = false
-  if _ui_font then pushed = pcall(reaper.ImGui_PushFont, ctx, _ui_font, 13) end
-
-  local out = {}
+-- What a script holds, for the summary card: ImGui cannot draw it (below).
+-- Speaker names are listed only when they are plain ASCII, for the same
+-- reason.
+function SUI.script_stats(s)
+  local st = { paras = 0, words = 0, chars = _utf8_len(s), speakers = {}, names = true }
+  local seen = {}
   for para in (s .. '\n\n'):gmatch('(.-)\n%s*\n') do
-    -- Collapse the paragraph back to its logical blocks first, so a reflow
-    -- of already-wrapped text re-wraps cleanly instead of compounding.
-    local blocks, buf = {}, {}
+    if para:find('%S') then st.paras = st.paras + 1 end
     for raw in (para .. '\n'):gmatch('(.-)\n') do
-      -- A fresh local, not the loop variable: Lua 5.4 makes for-loop control
-      -- variables const, so assigning back into it refuses to compile.
       local ln = raw:match('^%s*(.-)%s*$')
-      if ln ~= '' then
-        if _is_speaker_line(ln) then
-          if #buf > 0 then blocks[#blocks + 1] = table.concat(buf, ' '); buf = {} end
-          blocks[#blocks + 1] = ln
-        else
-          buf[#buf + 1] = ln
+      if ln ~= '' and _is_speaker_line(ln) then
+        local name = ln:sub(1, -2)
+        if not seen[name] then
+          seen[name] = true
+          st.speakers[#st.speakers + 1] = name
+          if name:find('[\128-\255]') then st.names = false end
         end
+      else
+        for _ in ln:gmatch('%S+') do st.words = st.words + 1 end
       end
     end
-    if #buf > 0 then blocks[#blocks + 1] = table.concat(buf, ' ') end
-
-    for _, b in ipairs(blocks) do
-      local line
-      for word in b:gmatch('%S+') do
-        local try = line and (line .. ' ' .. word) or word
-        local okw, w = pcall(reaper.ImGui_CalcTextSize, ctx, try)
-        if line and okw and type(w) == 'number' and w > px then
-          out[#out + 1] = line
-          line = word          -- a word wider than the box gets its own line
-        else
-          line = try
-        end
-      end
-      if line then out[#out + 1] = line end
-    end
-    if #blocks > 0 then out[#out + 1] = '' end
   end
+  return st
+end
 
-  if pushed then pcall(reaper.ImGui_PopFont, ctx) end
+-- A script file as the matcher wants it: no UTF-8 BOM, no CRLF, or every
+-- line carries a stray \r into the prompts.
+function SUI.read_script_file(path)
+  local fh = io.open(path, 'rb')
+  if not fh then return nil end
+  local body = fh:read('*a'); fh:close()
+  return ((body or ''):gsub('^\239\187\191', ''):gsub('\r\n', '\n'))
+end
 
-  -- Drop the blank line the last paragraph added.
-  while #out > 0 and out[#out] == '' do out[#out] = nil end
-  return table.concat(out, '\n')
+-- Hand the draft to Notepad, which shapes Indic text properly. The popup
+-- re-reads the file while it is open, so a save there lands here.
+function SUI.script_open_external(d)
+  local path = get_script_dir() .. '/script_edit.txt'
+  local fh = io.open(path, 'wb')
+  if not fh then ui_set_banner('error', 'Could not write ' .. path); return end
+  fh:write(d.draft or ''); fh:close()
+  d.ext, d.ext_last, d.ext_next = path, d.draft or '', 0
+  if reaper.GetOS():match('Win') and reaper.CF_ShellExecute then
+    reaper.CF_ShellExecute('notepad.exe', '"' .. path:gsub('/', '\\') .. '"')
+  else
+    open_path(path)
+  end
 end
 
 -- The script editor, as a modal over the whole window. Session's Paste and
@@ -3807,127 +3823,77 @@ local function ui_script_popup(ctx)
       .. 'the matcher pivots through those groups to place lines it is unsure about.')
     SUI.gap(ctx, 8)
 
+    -- Pick up a save from Notepad. ImGui cannot shape Devanagari or Bengali:
+    -- matras land on the wrong side of their consonant and conjuncts come
+    -- apart, so this popup never draws the script itself. Notepad does.
+    if d.ext and os.clock() >= (d.ext_next or 0) then
+      d.ext_next = os.clock() + 0.5
+      local body = SUI.read_script_file(d.ext)
+      if body and body ~= d.ext_last then d.ext_last, d.draft = body, body end
+    end
+
     local has = (d.draft or '') ~= ''
-
-    -- Toolbar: the counts on the left as a live read-out of the box, the
-    -- verbs on the right. No line count: once the box reflows, the number of
-    -- lines says more about the window's width than about the script.
-    if has then
-      local paras = 1
-      for _ in d.draft:gmatch('\n%s*\n') do paras = paras + 1 end
-      SUI.ftext(ctx, SUI.col.dim, string.format(
-        '%d paragraph%s  ·  %d characters',
-        paras, paras == 1 and '' or 's', _utf8_len(d.draft)))
-    else
-      SUI.ftext(ctx, SUI.col.faint, 'Nothing pasted yet')
-    end
-
     local btnw, gap = 132, 6
-    local row  = btnw * 2 + (has and 68 + gap or 0) + gap
-    local lx = 120
-    local oki, ix = pcall(reaper.ImGui_GetItemRectMax, ctx)
-    local okw, px = pcall(reaper.ImGui_GetWindowPos, ctx)
-    if oki and okw and type(ix) == 'number' and type(px) == 'number' then
-      lx = ix - px
-    end
-    reaper.ImGui_SameLine(ctx)
-    local rx = reaper.ImGui_GetCursorPosX(ctx)
-    reaper.ImGui_SetCursorPosX(ctx, math.max(lx + gap,
-      rx + reaper.ImGui_GetContentRegionAvail(ctx) - row))
-
-    if SUI.cta(ctx, 'Paste from clipboard##scr', btnw, 26, 'ghost') then
+    if SUI.cta(ctx, 'Paste from clipboard##scr', btnw + 16, 26, has and 'ghost' or nil) then
       local okc, clip = pcall(reaper.ImGui_GetClipboardText, ctx)
       if okc and type(clip) == 'string' and clip ~= '' then
-        d.draft = _script_rewrap(ctx, (clip:gsub('\r\n', '\n')), _script_px)
+        d.draft = (clip:gsub('\r\n', '\n'))
       else
         ui_set_banner('warn', 'Nothing on the clipboard to paste.')
       end
     end
     reaper.ImGui_SameLine(ctx, 0, gap)
-
-    if SUI.cta(ctx, 'Load .txt…##scr', btnw, 26, 'ghost') then
+    if SUI.cta(ctx, 'Load .txt…##scr', btnw - 24, 26, 'ghost') then
       local okf, path = reaper.GetUserFileNameForRead('', 'Open dub script', '.txt')
       if okf and path and path ~= '' then
-        local fh = io.open(path, 'rb')
-        if fh then
-          local body = fh:read('*a'); fh:close()
-          -- Strip a UTF-8 BOM and normalise CRLF, or every line ends in a
-          -- stray \r that the matcher would carry into its prompts.
-          body = (body or ''):gsub('^\239\187\191', ''):gsub('\r\n', '\n')
-          d.draft = _script_rewrap(ctx, body, _script_px)
-        else
-          ui_set_banner('error', 'Could not read ' .. path)
-        end
+        local body = SUI.read_script_file(path)
+        if body then d.draft = body else ui_set_banner('error', 'Could not read ' .. path) end
       end
     end
-
+    reaper.ImGui_SameLine(ctx, 0, gap)
+    if SUI.cta(ctx, (reaper.GetOS():match('Win') and 'Open in Notepad' or 'Open in editor')
+                    .. '##scr', btnw, 26, 'ghost') then
+      SUI.script_open_external(d)
+    end
     if has then
       reaper.ImGui_SameLine(ctx, 0, gap)
       if SUI.cta(ctx, 'Clear##scr', 68, 26, 'ghost') then d.draft = '' end
     end
-    SUI.gap(ctx, 4)
-
-    -- Re-read: a Paste or Load this frame has already filled the box, and the
-    -- placeholder below must not draw over what it just put there.
+    SUI.gap(ctx, 8)
     has = (d.draft or '') ~= ''
 
-    -- The editor. Darker than the popup so it reads as a well you type into,
-    -- padded like a document rather than a form field. The Indic font goes
-    -- on here too: the script is in the dub language, and without it the box
-    -- renders boxes.
-    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_FrameBg(),        0x10131AFF)
-    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_FrameBgHovered(), 0x10131AFF)
-    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_FrameBgActive(),  0x10131AFF)
-    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Border(),         SUI.col.line)
-    reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FrameRounding(), 12.0)
-    reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding(), 12.0, 10.0)
-    -- 13, not the log's 16: Devanagari and Bengali carry tall ascenders and
-    -- descenders, so an Indic face at a Latin face's size sets far looser than
-    -- it looks on paper and a pasted script fills the box in a few lines.
-    if _ui_font then pcall(reaper.ImGui_PushFont, ctx, _ui_font, 13) end
-
-    -- InputTextMultiline paints its own scrollbar inside the frame and takes
-    -- no window flags, so it is starved of width. The box still scrolls on
-    -- the wheel and follows the caret.
-    reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ScrollbarSize(), 0.0)
-    local rv
-    rv, d.draft = reaper.ImGui_InputTextMultiline(ctx, '##script',
-      d.draft or '', -1, -48)
-    reaper.ImGui_PopStyleVar(ctx)
-
-    -- Inner width, for the reflow below. 24 is the frame padding either side;
-    -- the 8 is breathing room so the last glyph on a line is not flush against
-    -- the edge.
-    local okz, zw = pcall(reaper.ImGui_GetItemRectSize, ctx)
-    if okz and type(zw) == 'number' then _script_px = math.max(0, zw - 24 - 8) end
-
-    -- Soft wrap, kept true without a button to press. Reflow when the box has
-    -- changed width or the buffer has changed length (Ctrl+V, or typing), and
-    -- never while the caret is in the box: rewriting the buffer under an
-    -- active InputText throws the caret back to the start. So an edit
-    -- settles onto the new wrap on blur.
-    if has and _script_px >= 80 and not reaper.ImGui_IsItemActive(ctx)
-       and (math.abs(_script_px - _script_wrap_px) > 2
-            or #d.draft ~= _script_wrap_len) then
-      d.draft          = _script_rewrap(ctx, d.draft, _script_px)
-      _script_wrap_px  = _script_px
-      _script_wrap_len = #d.draft
-    end
-
-    -- Placeholder. InputTextMultiline has no hint of its own, so it is drawn
-    -- over the empty box, inside the same padding the real text would use.
-    if not has and reaper.ImGui_GetItemRectMin and reaper.ImGui_DrawList_AddText then
-      local okr, bx, by = pcall(reaper.ImGui_GetItemRectMin, ctx)
-      if okr and type(bx) == 'number' then
-        pcall(reaper.ImGui_DrawList_AddText, reaper.ImGui_GetWindowDrawList(ctx),
-          bx + 12, by + 10, SUI.col.gutter,
-          'Paste the dub script here…')
+    -- The summary, in a well where the editor used to be.
+    reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ChildRounding(), 12.0)
+    reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), 16.0, 14.0)
+    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ChildBg(), 0x10131AFF)
+    local cf, wf = _child_pad_flag()
+    if reaper.ImGui_BeginChild(ctx, '##scrsum', -1, -48, cf, SUI.NOSB | wf) then
+      if has then
+        local st = SUI.script_stats(d.draft)
+        SUI.big(ctx, SUI.col.vo, 'Script ' .. (d.ext and 'loaded from Notepad' or 'ready'), 15)
+        SUI.gap(ctx, 4)
+        SUI.text(ctx, SUI.col.dim, string.format('%d paragraph%s  ·  %d words  ·  %d characters',
+          st.paras, st.paras == 1 and '' or 's', st.words, st.chars))
+        if #st.speakers > 0 then
+          SUI.text(ctx, SUI.col.dim, string.format('%d speaker%s%s', #st.speakers,
+            #st.speakers == 1 and '' or 's',
+            st.names and (':  ' .. table.concat(st.speakers, ', ')) or ''))
+        end
+      else
+        SUI.big(ctx, SUI.col.faint, 'Nothing pasted yet', 15)
+        SUI.gap(ctx, 4)
+        SUI.wrap(ctx, SUI.col.faint, 'Copy the script, then press Paste from clipboard. '
+          .. 'Or open Notepad, paste it there and save.')
       end
+      SUI.gap(ctx, 10)
+      SUI.wrap(ctx, SUI.col.faint, d.ext
+        and 'Editing in Notepad. Save there (Ctrl+S) and this updates.'
+        or  'The script is not shown here because this panel cannot draw '
+         .. 'Indic text correctly. To read or edit it, open it in Notepad.')
+      reaper.ImGui_EndChild(ctx)
     end
-
-    if _ui_font then pcall(reaper.ImGui_PopFont, ctx) end
+    reaper.ImGui_PopStyleColor(ctx)
     reaper.ImGui_PopStyleVar(ctx, 2)
-    reaper.ImGui_PopStyleColor(ctx, 4)
 
     -- Cancel and Done pinned right, Done last. No Enter-to-confirm here:
     -- Enter is a new line in the box. Escape is ImGui's own and reads below
@@ -3964,25 +3930,57 @@ local function ui_pane_run(ctx)
   SUI.phase_strip(ctx)
   SUI.gap(ctx, 8)
 
+  -- Log, pinned to the right end of the status row and drawn first, so the
+  -- status below can be any of its five shapes without moving it. Its count
+  -- is errors plus warnings, and it turns red once there is an error.
+  local sx, sy = reaper.ImGui_GetCursorPos(ctx)
+  local aw     = reaper.ImGui_GetContentRegionAvail(ctx)
+  local LW     = 84
+  local nerr, nwarn = SUI.log_counts()
+  reaper.ImGui_SetCursorPos(ctx, sx + math.max(0, (aw or 0) - LW), sy - 5)
+  if SUI.cta(ctx, (nerr + nwarn > 0) and string.format('Log  %d##logbtn', nerr + nwarn)
+                  or 'Log##logbtn', LW, 26, nerr > 0 and 'danger' or 'ghost') then
+    SUI.log_open = true
+  end
+  reaper.ImGui_SetCursorPos(ctx, sx, sy)
+
   if _st.running then
+    -- Every piece of this line starts at a fixed column measured from the
+    -- widest text it can hold, so neither the spinner nor the ticking clock
+    -- can push the words after them around.
     local elapsed = os.time() - _poll_start_time
-    SUI.text(ctx, SUI.col.dub, _spinner_glyph() .. '   Running')
-    reaper.ImGui_SameLine(ctx, 0, 14)
-    local clock = SUI.mmss(elapsed) .. ' elapsed'
-    if _ui_progress > 0.05 and _ui_progress < 0.99 then
-      clock = clock .. '   ·   about '
-        .. SUI.mmss(elapsed * (1.0 - _ui_progress) / _ui_progress) .. ' left'
+    local function tw(s)
+      local ok, w = pcall(reaper.ImGui_CalcTextSize, ctx, s)
+      return (ok and type(w) == 'number') and w or #s * 7
     end
-    SUI.text(ctx, SUI.col.dim, clock)
+    local x0    = reaper.ImGui_GetCursorPosX(ctx)
+    local lh    = reaper.ImGui_GetTextLineHeight(ctx)
+    local x_run = x0 + lh + 10
+    local x_clk = x_run + tw('Running') + 14
+    local x_eta = x_clk + math.max(tw('00:00 elapsed'), tw('88:88 elapsed')) + 10
+    _spinner_ring(ctx, lh, SUI.col.dub)
+    reaper.ImGui_SameLine(ctx, x_run)
+    SUI.text(ctx, SUI.col.dub, 'Running')
+    reaper.ImGui_SameLine(ctx, x_clk)
+    SUI.text(ctx, SUI.col.dim, SUI.mmss(elapsed) .. ' elapsed')
+    if _ui_progress > 0.05 and _ui_progress < 0.99 then
+      reaper.ImGui_SameLine(ctx, x_eta)
+      SUI.text(ctx, SUI.col.dim, '·   about '
+        .. SUI.mmss(elapsed * (1.0 - _ui_progress) / _ui_progress) .. ' left')
+    end
     SUI.gap(ctx, 2)
     SUI.bar(ctx, _ui_progress, -52, 8)
     reaper.ImGui_SameLine(ctx, 0, 10)
     SUI.text(ctx, SUI.col.dim, string.format('%.0f%%', _ui_progress * 100))
+    local last = _log_buffer[#_log_buffer]
+    if last then
+      SUI.line_clipped(ctx, SUI.col.faint, 'Last line:  ' .. (last:gsub('^%s+', '')))
+    end
   elseif _ui_phase == 'success' then
     SUI.text(ctx, SUI.col.ok, _ui_result or 'Run complete.')
   elseif _ui_phase == 'failure' then
     SUI.text(ctx, SUI.col.err, _ui_cancelled and 'Cancelled. The timeline was not touched.'
-                                             or 'The run stopped. The log below says why.')
+                                             or 'The run stopped. Press Log to see why.')
   elseif _st.can_start and _st.tracks_ok then
     SUI.text(ctx, SUI.col.dim, string.format(
       'Ready: %d VO clips, %d dub clips. Press Start sync.', _st.en, _st.dub))
@@ -4035,9 +4033,9 @@ local function ui_pane_run(ctx)
 end
 
 
--- ─── The worker log, as a drawer ──────────────────────────
+-- ─── The worker log, as a popup ───────────────────────────
 -- A log you can only scroll is a wall. The one thing you actually want out
--- of a three-minute run is the clip that went wrong, so the open drawer
+-- of a three-minute run is the clip that went wrong, so the popup
 -- carries a level filter, a text filter and a time gutter — and nothing else.
 local function ui_log_body(ctx)
   if #_log_buffer == 0 then
@@ -4047,11 +4045,7 @@ local function ui_log_body(ctx)
     return
   end
 
-  local nerr, nwarn = 0, 0
-  for i = 1, #_log_buffer do
-    if     SUI.log_is_err(_log_buffer[i])  then nerr  = nerr  + 1
-    elseif SUI.log_is_warn(_log_buffer[i]) then nwarn = nwarn + 1 end
-  end
+  local nerr, nwarn = SUI.log_counts()
 
   -- Level chips. A chip that would filter to nothing still shows its zero —
   -- "Errors 0" is the answer to a question you were about to ask.
@@ -4147,50 +4141,57 @@ local function ui_log_body(ctx)
 end
 
 
--- The drawer itself: a one-line header that always shows the newest line,
--- and the full filterable log underneath when it is open.
-local function ui_log_drawer(ctx)
-  local open = SUI.pane(ctx, '##drawer', -1, 0, SUI.col.rail, 16.0, 9.0, 14.0)
-  if open then
-    local okp, x0, y0 = pcall(reaper.ImGui_GetCursorScreenPos, ctx)
-    local ww = reaper.ImGui_GetWindowWidth(ctx)
-    local BW = 74
+-- The log as a modal over the whole window, opened by the Log button on Run.
+-- Drawn at window scope like the script popup, so no child clips it.
+local function ui_log_popup(ctx)
+  if not SUI.log_open then SUI.log_shown = false; return end
+  if not SUI.log_shown then
+    reaper.ImGui_OpenPopup(ctx, 'Log##logdlg')
+    SUI.log_shown = true
+  end
 
+  local wx, wy = reaper.ImGui_GetWindowPos(ctx)
+  local ww, wh = reaper.ImGui_GetWindowSize(ctx)
+  reaper.ImGui_SetNextWindowPos(ctx, wx + ww * 0.5, wy + wh * 0.5,
+    reaper.ImGui_Cond_Always(), 0.5, 0.5)
+  reaper.ImGui_SetNextWindowSize(ctx, math.min(820, ww - 48), math.min(560, wh - 48),
+    reaper.ImGui_Cond_Always())
+
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), 18.0, 16.0)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowRounding(), 14.0)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_PopupBg(), SUI.col.rail)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Border(),  SUI.col.line)
+
+  local flags = reaper.ImGui_WindowFlags_NoTitleBar()
+              | reaper.ImGui_WindowFlags_NoResize()
+              | reaper.ImGui_WindowFlags_NoMove()
+              | SUI.NOSB
+
+  if reaper.ImGui_BeginPopupModal(ctx, 'Log##logdlg', nil, flags) then
     if reaper.ImGui_AlignTextToFramePadding then
       pcall(reaper.ImGui_AlignTextToFramePadding, ctx)
     end
     SUI.eyebrow(ctx, 'Log')
-    reaper.ImGui_SameLine(ctx, 0, 14)
-    local okc, lx = pcall(reaper.ImGui_GetCursorScreenPos, ctx)
-
-    -- Newest line, clipped to the room left of the button.
-    local last = _log_buffer[#_log_buffer]
-    if okc and type(lx) == 'number' and okp and type(x0) == 'number' then
-      local dl = reaper.ImGui_GetWindowDrawList(ctx)
-      local wx = reaper.ImGui_GetWindowPos(ctx)
-      local right = wx + ww - 16 - BW - 12
-      local okt, _, th = pcall(reaper.ImGui_CalcTextSize, ctx, 'Ag')
-      th = (okt and type(th) == 'number') and th or 14
-      pcall(reaper.ImGui_DrawList_PushClipRect, dl, lx, y0, right, y0 + 26, true)
-      pcall(reaper.ImGui_DrawList_AddText, dl, lx, y0 + (26 - th) * 0.5,
-        last and SUI.log_colour(last) or SUI.col.faint,
-        last and (last:gsub('^%s+', '')) or 'Nothing logged yet.')
-      pcall(reaper.ImGui_DrawList_PopClipRect, dl)
-    end
-
+    local BW = 84
     reaper.ImGui_SameLine(ctx)
-    reaper.ImGui_SetCursorPosX(ctx, math.max(120, ww - 16 - BW))
-    reaper.ImGui_SetCursorPosY(ctx, reaper.ImGui_GetCursorPosY(ctx) - 1)
-    if SUI.cta(ctx, (SUI.drawer_open and 'Close' or 'Open') .. '##drawer', BW, 26, 'ghost') then
-      SUI.drawer_open = not SUI.drawer_open
-    end
+    reaper.ImGui_SetCursorPosX(ctx, math.max(80, reaper.ImGui_GetWindowWidth(ctx) - 18 - BW))
+    local close = SUI.cta(ctx, 'Close##logdlg', BW, 26, 'ghost')
+    SUI.gap(ctx, 4)
+    ui_log_body(ctx)
 
-    if SUI.drawer_open then
-      SUI.gap(ctx, 4)
-      ui_log_body(ctx)
+    local esc = reaper.ImGui_Key_Escape
+      and reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Escape())
+    if close or esc then
+      SUI.log_open = false
+      reaper.ImGui_CloseCurrentPopup(ctx)
     end
+    reaper.ImGui_EndPopup(ctx)
+  else
+    SUI.log_open = false
   end
-  SUI.pane_end(ctx, open)
+
+  reaper.ImGui_PopStyleColor(ctx, 2)
+  reaper.ImGui_PopStyleVar(ctx, 2)
 end
 
 
@@ -4368,7 +4369,7 @@ end
 
 -- ─── The detail pane: header, then whichever section is selected ──
 local function ui_detail(ctx, h)
-  if _ui_nav == 'log' then SUI.drawer_open = true; _ui_nav = 'run' end
+  if _ui_nav == 'log' then SUI.log_open = true; _ui_nav = 'run' end
   local open = SUI.pane(ctx, '##detail', -1, h, 0x00000000, 18.0, 14.0)
   if open then
     -- Studio drops the little gradient rule that used to sit above the
@@ -4887,29 +4888,24 @@ local function render_active_phase(ctx, on_close)
     if not _st.conn_ok then _ui_nav = 'connection' end
   end
 
-  -- The three regions are separated by SHELL_PAD, and the window itself
+  -- The two regions are separated by SHELL_PAD, and the window itself
   -- carries the same padding (pushed around Begin), so nothing touches the
   -- frame and each region keeps its own rounded corners.
   reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing(),
     SHELL_PAD, SHELL_PAD)
   ui_rail(ctx, start_sync_run)
   reaper.ImGui_SameLine(ctx, 0, SHELL_PAD)
-  -- Right-hand column: the page, and the log drawer under it. Shut, the
-  -- drawer is one line; open, it takes a little under half the column.
+  -- Right-hand column: the page, the full height of it.
   reaper.ImGui_BeginGroup(ctx)
-  local _, avail_h = reaper.ImGui_GetContentRegionAvail(ctx)
-  avail_h = (type(avail_h) == 'number') and avail_h or 480
-  local drawer_h = SUI.drawer_open and math.max(200, math.floor(avail_h * 0.45))
-                   or SUI.DRAWER_SHUT
-  ui_detail(ctx, -(drawer_h + SHELL_PAD))
-  ui_log_drawer(ctx)
+  ui_detail(ctx, 0)
   reaper.ImGui_EndGroup(ctx)
   reaper.ImGui_PopStyleVar(ctx)
 
-  -- Last, and outside the three regions: a modal opened from inside one of
+  -- Last, and outside the two regions: a modal opened from inside one of
   -- those children would belong to it and be clipped by it.
   ui_render_dialog(ctx)
   ui_script_popup(ctx)
+  ui_log_popup(ctx)
 end
 
 
