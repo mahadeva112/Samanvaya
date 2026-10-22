@@ -451,11 +451,15 @@ _FFMPEG_TIMEOUT = float(os.environ.get("SYNC_FFMPEG_TIMEOUT", "120"))
 
 def extract_chunk_ffmpeg(wav_path, take_offset, duration, out_path):
     """Extract audio slice using ffmpeg subprocess (fallback)."""
+    # -ss before -i seeks the input instead of decoding up to the offset: on a
+    # long video that is the difference between instant and minutes per clip.
+    # ffmpeg re-encodes here, so the input seek is still sample-accurate.
     cmd = [
         "ffmpeg", "-y",
-        "-i", wav_path,
         "-ss", str(take_offset),
+        "-i", wav_path,
         "-t",  str(duration),
+        "-vn",
         "-ar", "16000",
         "-ac", "1",
         out_path
@@ -521,9 +525,17 @@ def _extract_slice(wav_path, take_offset, duration, out_path):
       2. stdlib wave — PCM .wav, zero deps (thin-client default)
       3. ffmpeg      — any format, if the binary is on PATH
     Raises only if all backends fail.
+
+    A backend that cannot read the file must fall through to the next one:
+    soundfile cannot open .mp4/.mov, and returning its error straight away
+    meant a video source never reached ffmpeg at all.
     """
     if HAS_SOUNDFILE:
-        return extract_chunk_soundfile(wav_path, take_offset, duration, out_path)
+        try:
+            return extract_chunk_soundfile(wav_path, take_offset, duration,
+                                           out_path)
+        except Exception:
+            pass
     try:
         return extract_chunk_wave(wav_path, take_offset, duration, out_path)
     except Exception:
@@ -551,8 +563,22 @@ def _source_duration(wav_path):
     if dur is None:
         # Stdlib probe — PCM WAV only, None for anything else.
         dur = _wav_duration(wav_path)
+    if dur is None:
+        dur = _ffprobe_duration(wav_path)
     _SOURCE_DURATION_CACHE[wav_path] = dur
     return dur
+
+
+def _ffprobe_duration(path):
+    """Container duration via ffprobe (video, AAC, ...). None if unavailable."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, timeout=30, creationflags=_NO_WINDOW_FLAGS)
+        return float(result.stdout.decode().strip())
+    except Exception:
+        return None
 
 
 # When extraction fails we used to hand ASR the whole source file. That is only
@@ -568,8 +594,13 @@ def _extract_failed(item_id, wav_path, err):
     """Log an extraction failure and decide what to transcribe instead."""
     print(f"    [WARN] Could not extract chunk for item {item_id}: {err}")
     dur = _source_duration(wav_path)
-    if dur is not None and dur > _FULL_FILE_FALLBACK_MAX:
-        print(f"    [WARN] Source is {dur:.0f}s — skipping this clip rather "
+    # An unknown length is treated as too long. A whole-talk transcript handed
+    # to one clip is worse than none: every clip then reads the same, and the
+    # sub-splitter places the talk's word timings at that clip's position —
+    # which once shifted an entire dub track by 327 seconds.
+    if dur is None or dur > _FULL_FILE_FALLBACK_MAX:
+        what = "of unknown length" if dur is None else f"{dur:.0f}s"
+        print(f"    [WARN] Source is {what} — skipping this clip rather "
               f"than sending the whole file to ASR")
         return None
     print(f"    [WARN] Falling back to full source file (accuracy may suffer)")
@@ -3010,6 +3041,14 @@ def _split_long_en_items(en_items, cache, asr_provider, elevenlabs_key,
         words = _clean_words(result.get("words"))
         if not words:
             print(f"{label} — ASR returned no word timings, kept whole")
+            continue
+        # Word times are read as offsets into this clip. Words running far
+        # past its end mean ASR heard something longer (the whole source,
+        # after a failed slice), and placing those would shift every match.
+        if words[-1]["end"] > item["duration"] + 2.0:
+            print(f"{label} — word timings run to {words[-1]['end']:.0f}s, "
+                  f"past the clip's end; transcript is not this clip's, "
+                  f"kept whole")
             continue
 
         ranges = _split_words_into_segments(
